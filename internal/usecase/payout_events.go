@@ -47,8 +47,8 @@ func NewPayoutEventSink(log *zap.Logger) *PayoutEventSink {
 }
 
 // AppendTransitionEvent собирает конверт события и записывает его в outbox.
-// Переходы в состояния без типа в CF-2 (reserved, sent_to_gateway, rejected)
-// пропускаются: контракт не имеет для них события.
+// Переходы в состояния без типа в контракте (reserved, sent_to_gateway)
+// пропускаются: события несут бизнес-вехи, а не внутренние шаги саги.
 func (s *PayoutEventSink) AppendTransitionEvent(ctx context.Context, tx *gorm.DB, event storage.TransitionEvent) error {
 	envelope, emit, err := BuildPayoutEventEnvelope(event)
 	if err != nil {
@@ -146,7 +146,7 @@ func BuildPayoutCommandEnvelope(payout storage.Payout) (outbox.Envelope, error) 
 }
 
 // payoutEventType переводит целевое состояние перехода в контрактный тип;
-// состояния reserved, sent_to_gateway и rejected типа не имеют (CF-2).
+// состояния reserved и sent_to_gateway типа не имеют (внутренние шаги).
 func payoutEventType(state domain.State) (eventsv1.PayoutEventType, bool) {
 	switch state {
 	case domain.StateRequested:
@@ -159,6 +159,8 @@ func payoutEventType(state domain.State) (eventsv1.PayoutEventType, bool) {
 		return eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_FAILED, true
 	case domain.StateCompensated:
 		return eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPENSATED, true
+	case domain.StateRejected:
+		return eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_REJECTED, true
 	default:
 		return eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_UNSPECIFIED, false
 	}

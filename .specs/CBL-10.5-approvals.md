@@ -207,7 +207,11 @@ approve, required), Info на переход (state, version), без сумм �
   возобновление саги после `approved` - 10.2; 10.5 не поднимает сагу.
 - `rejected` не имеет события в CF-2 (`payout.events` типы без rejected):
   Notification об отказе оператора - вопрос 12.2/8.x (зафиксировано в 10.1,
-  T-PAYOUT-04).
+  T-PAYOUT-04). Закрыто на CF-3 (15.10.2026): тип `PAYOUT_EVENT_TYPE_REJECTED`
+  добавлен в `payout.events`, вето эмитит `payout.rejected` в транзакции
+  перехода (integration-тест
+  `TestIntegrationRejectionEmitsPayoutEvent`), вебхук - `payout.failed` со
+  статусом `rejected` (8.x).
 - RBAC оператора (кто вправе апрувить) - 12.1/12.2; здесь проверяется только
   формат и уникальность идентификатора оператора. До mTLS/authN (0.5/0.6)
   любой участник доверенной сети может набрать кворум произвольными

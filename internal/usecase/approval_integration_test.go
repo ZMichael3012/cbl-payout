@@ -16,10 +16,14 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+
+	"github.com/cbl/cbl-kit/outbox"
 	"github.com/cbl/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-payout/internal/domain"
@@ -147,6 +151,37 @@ func TestIntegrationApprovalReject(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Approve(ctx, payout.ID, "op-3", true, "")
 	require.ErrorIs(t, err, usecase.ErrPayoutDecided)
+}
+
+// TestIntegrationRejectionEmitsPayoutEvent проверяет, что вето оператора
+// (10.5) эмитит payout.rejected в outbox в транзакции перехода (тип добавлен
+// контрактом CF-3): событие и переход коммитятся вместе.
+func TestIntegrationRejectionEmitsPayoutEvent(t *testing.T) {
+	db := setupApprovalDB(t)
+	repo := storage.NewRepository(db, storage.WithEventSink(usecase.NewPayoutEventSink(zap.NewNop())))
+	service := approvalServiceAt(t, repo, `{"default":2}`)
+	ctx := context.Background()
+
+	payout := approvalPayout(t, repo, 5_000_000)
+	_, err := service.Approve(ctx, payout.ID, "op-1", true, "")
+	require.NoError(t, err)
+
+	rejected, err := service.Approve(ctx, payout.ID, "op-2", false, "sanctions hit")
+	require.NoError(t, err)
+	require.Equal(t, string(domain.StateRejected), rejected.State)
+
+	events := outboxRows(t, db, usecase.TopicPayoutEvents)
+	require.Len(t, events, 2, "запрос и отклонение")
+	assert.Equal(t, "payout.requested", events[0].Headers[outbox.HeaderEventType])
+	assert.Equal(t, "payout.rejected", events[1].Headers[outbox.HeaderEventType])
+
+	payload := &eventsv1.PayoutEvent{}
+	require.NoError(t, proto.Unmarshal(events[1].Payload, payload))
+	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_REJECTED, payload.GetType())
+	assert.Equal(t, payout.ID, payload.GetPayoutId())
+	assert.Equal(t, "m-approval", payload.GetMerchantId())
+	assert.Equal(t, "sanctions hit", payload.GetFailureReason())
+	assert.Equal(t, uint64(2), payload.GetStateVersion(), "после создания и вето")
 }
 
 func TestIntegrationApprovalNotRequired(t *testing.T) {
