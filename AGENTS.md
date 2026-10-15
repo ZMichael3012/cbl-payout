@@ -16,35 +16,49 @@ Out of scope: другие сервисы платформы; взаимодей
 ## 2. Контракты
 
 - REST: административный /healthz, /readyz
-- gRPC: сервер PayoutService
-- Kafka продюсирует: payout.commands, payout.events
-- Kafka потребляет: ledger.events, gateway.payout.events
-- Хранилище: PostgreSQL payout
+- gRPC: сервер PayoutService (CreatePayout/GetPayout - 10.2, ApprovePayout - 10.5)
+- Kafka продюсирует: payout.commands, payout.events (через outbox, 10.2)
+- Kafka потребляет: ledger.events, gateway.payout.events (10.2/10.4)
+- Хранилище: PostgreSQL payout (payouts, payout_transitions, outbox, inbox)
 
-Контракты заморожены в `cbl-protos` (CF-1 для gRPC, CF-2/CF-3 для событий), см. `CBL-004`.
+Контракты заморожены в `cbl-protos` (CF-1 gRPC, CF-2 события), см. `CBL-004`.
 
 ## 3. Архитектура
 
 Слои: `internal/transport` -> `internal/usecase` -> `internal/domain` -> `internal/storage`.
 Библиотеки: стандартный набор `CBL-002` (Gin, GORM + pgx-драйвер, franz-go + pkg/sr, go-redis,
 goose, zap). `AutoMigrate` запрещен, миграции только goose, только вперед.
+Схема (10.1): `payouts` (состояние саги, `state_version`, суммы, реквизиты получателя,
+`reserve_id` удержания), `payout_transitions` (append-only журнал), `outbox`, `inbox`.
+Матрица переходов - `internal/domain/state.go`, дублируется триггером БД
+(`payouts_transition_guard`); переходы только через `storage.Repository.Transition`/
+`TransitionTx` с CAS по `state_version`. `Create` принудительно ставит `requested`/1 и
+зачищает данные саги (второй барьер - `payouts_insert_guard`).
+main применяет миграции (`MIGRATIONS_DIR`) и настраивает пул БД (по умолчанию 20,
+потолок 100, lifetime 30 минут).
 
 ## 4. Команды
 
 ```powershell
 make build        # go build ./...
 make test         # go test ./...
+make test-integration  # integration (testcontainers: PostgreSQL)
+make e2e          # compose-стенд: миграции, обе цепочки саги, второй барьер БД
 make vet          # go vet ./...
-make lint         # golangci-lint в Docker
-make up           # docker compose -f deploy/docker-compose.yml up -d
+make lint         # golangci-lint в Docker (контекст services/)
+make up           # docker compose -f deploy/docker-compose.yml --profile app up -d --build
 make down         # docker compose -f deploy/docker-compose.yml down -v
 ```
+
+`make test-e2e` (Kafka+PostgreSQL на testcontainers) возвращается в 10.2 вместе с сагой.
 
 ## 5. Порты и окружение
 
 HTTP `8080`, gRPC `9080`, метрики `9280`.
-Переменные (применимые к сервису): `HTTP_ADDR`, `GRPC_ADDR`, `METRICS_ADDR`, `PG_DSN`,
-`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `REDIS_ADDR`.
+Переменные (применимые к сервису): `HTTP_ADDR`, `GRPC_ADDR`, `METRICS_ADDR`, `PG_DSN`
+(обязателен), `MIGRATIONS_DIR` (по умолчанию `./migrations`), `DB_MAX_OPEN_CONNS`
+(по умолчанию 20, потолок 100), `DB_MAX_IDLE_CONNS` (по умолчанию 10);
+`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `REDIS_ADDR` подключаются в 10.2/10.4.
 
 ## 6. Правила разработки
 
@@ -67,20 +81,46 @@ consumer lag; дашборды после задачи 0.7.
 
 | ID | Решение | Плюсы | Минусы и компенсация |
 | :-- | :-- | :-- | :-- |
+| T-PAYOUT-01 | Матрица переходов в домене плюс триггеры БД (второй барьер): BEFORE INSERT фиксирует `requested`/версию 1 и пустые данные саги, BEFORE UPDATE проверяет пары, инкремент `state_version`, неизменяемые поля (суммы, реквизиты получателя, `reserve_id` после фиксации); журнал append-only | обход автомата, подмена адреса/суммы и двойная компенсация невозможны; аудит полный | дублирование матрицы в Go и SQL; прямой DML-роль может дописать журнал в обход приложения (модификация и удаление запрещены) | матрица зеркалируется полным перебором пар в integration-тесте; прямой DML вне модели угроз dev-стенда (роли prod - KI-payout-03) |
+| T-PAYOUT-02 | Оптимистичные переходы: чтение под row-локом и CAS по `state_version`; tx-вариант `TransitionTx` для записи перехода и outbox-строки одной транзакцией | корректная история, нет глобальных локов; сага 10.2 и consumer 10.4 атомарны с событиями | при конкуренции один из переходов получает `ErrStateConflict` и повторяется | повторы в саге/consumer-е; метрика после 0.7 |
+| T-PAYOUT-03 | `failed` не терминален: единственный исходящий переход `failed -> compensated`; компенсация - release удержания в Ledger (без проводок, T-LED-06) или закрытие саги без release, если резерва не было | у выплаты один финальный статус компенсации, удержание не зависает; освобождение не создает фиктивного движения | сага обязана довести компенсацию после рестарта; очередь компенсаций - частичный индекс саги (включает `failed`) | фоновое восстановление саги - 10.4/10.7; ретеншен/KI |
+| T-PAYOUT-04 | Состояния внутренних шагов саги (`reserved`, `sent_to_gateway`, `rejected`) не публикуются в `payout.events` (CF-2): события только `requested/approved/completed/failed/compensated` | контракт стабилен, потребители (Notification 8.x, ClickHouse 11.x) видят бизнес-вехи, а не внутренние шаги | мерчант не получает вебхук об отказе оператора (`rejected`) до решения 10.5/7.4 | эскалация типа события - владелец контракта (CF-2/CF-3) при требовании Notification |
+| T-PAYOUT-05 | Данные саги заполняются только переходами (`reserve_id`, `gateway_payout_id`, `provider`, `txid`, `failure_reason`, `completed_at`, `fee_*`); `Create` зачищает переданные значения, INSERT guard их запрещает | тихая подмена контекста саги до апрува невозможна | guardian-логика дублируется в репозитории и триггере | тесты: INSERT с ready-полями отклоняется; `Create` с предзаполненными полями их зачищает |
 
 ## 9. Known issues
 
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-payout-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
+| KI-payout-02 | Нет mTLS и authN на gRPC PayoutService (9080) и топиках `payout.commands`/`payout.events`: с 10.2 любой участник доверенной сети создает выплату или подделывает команду/результат, двигая деньги (кросс-ссылки KI-ledger-02, KI-payment-04) | prod-выкладка запрещена; gRPC и топики не публиковать за доверенную сеть | mTLS/авторизация (0.5/0.6), ACL на `payout.commands` (produce только cbl-payout) и `gateway.payout.events` (produce только Connector) | open |
+| KI-payout-03 | Рантайм и миграции под одним DSN: владелец схемы может снять триггеры второго барьера | в dev-контуре барьер снимается владельцем БД (как KI-payment-03) | разделение ролей migrator/runtime при выходе в prod (0.4/0.6) | open |
+| KI-payout-04 | Нет ретеншена и партиционирования `payouts`, `payout_transitions`, `outbox` | рост БД и бэкапов | задача 14.2 (как KI-ledger-09, KI-payment-02) | open |
+| KI-payout-05 | `account_id` счета выплат (UUIDv5 плана счетов) в 10.2 воспроизводится по golden-векторам (KI-ledger-08) | риск дрейфа с леджером | перенос вывода в cbl-kit до 10.2/7.4; векторы обязательны в тестах | open |
+| KI-payout-06 | Провайдер шлюза не выбран (KI-01 системный): `CreatePayout` в Connector (10.3) не реализован | блокирует сквозной поток 10.2/10.4/10.7 с реальным шлюзом | mock-gateway/заглушки до выбора провайдера | open |
+| KI-payout-07 | Race detector недоступен локально (нет CGO на Windows) | конкурентные тесты без `-race` | CI (0.2) | open |
+| KI-payout-08 | gRPC reflection включен безусловно | избыточное раскрытие API в prod | отключить в prod-профиле при наблюдаемости 0.7 | open |
 
 ## 10. Журнал задач
 
 | CBL | Дата | Статус | Спека | Коммит |
 | :-- | :-- | :-- | :-- | :-- |
+| CBL-10.1 | 2026-10-15 | done, ревью закрыто (схема payouts/payout_transitions, автомат с двойным барьером и CAS, `reserve_id`, e2e обе цепочки, покрытие 90.6%) | `.specs/CBL-10.1-payout-schema.md` | этот коммит |
 
 ## 11. Runbook
 
-Заполняется первой продуктовой задачей сервиса. Типовые аварии: недоступность зависимости,
-рост ошибок, лаг обработки; действия: проверить health/metrics, логи с request_id, состояние
-Kafka consumer group и outbox lag, при необходимости перезапустить сервис.
+Автомат выплаты (10.1):
+
+1. Состояние и история: `SELECT state, state_version, reserve_id, gateway_payout_id
+   FROM payouts WHERE id = '...'`; путь переходов - `SELECT from_state, to_state,
+   state_version, reason, occurred_at FROM payout_transitions WHERE payout_id = '...'
+   ORDER BY state_version`.
+2. `ErrStateConflict` в логах: конкурентный переход (сага 10.2 против consumer-а
+   10.4); вызывающий повторяет цикл с чтением свежей версии (`Get`/`PayoutTx`).
+3. Правка состояния напрямую в БД невозможна (триггер): исправление - только
+   допустимый переход через приложение; `payout_transitions` append-only.
+4. Зависшие выплаты (нет движения): `SELECT id, state, updated_at FROM payouts
+   WHERE state IN ('requested','approved','reserved','sent_to_gateway','failed')
+   AND updated_at <= now() - interval '15 minutes' ORDER BY updated_at` - разбор
+   саги в 10.4/10.7; незакомпенсированное `failed` - приоритет (удержание).
+5. `reserve_id` зафиксирован при `reserved` и неизменяем; компенсация
+   (`failed -> compensated`) обязана использовать именно его (release).

@@ -1,4 +1,4 @@
-.PHONY: build test vet lint fmt up down
+.PHONY: build test test-integration e2e vet lint fmt up down
 
 build:
 	go build ./...
@@ -6,17 +6,24 @@ build:
 test:
 	go test ./...
 
+test-integration:
+	go test -tags integration -count=1 ./internal/...
+
+e2e:
+	powershell -NoProfile -File test/e2e/schema.ps1
+
 vet:
 	go vet ./...
 
+# lint монтирует каталог services/ целиком: replace на ../cbl-kit резолвится в контейнере.
 lint:
-	docker run --rm -v "$(CURDIR)":/app -w /app golangci/golangci-lint:v1.64.8-alpine golangci-lint run ./...
+	docker run --rm -v "$(CURDIR)/..":/src -w /src/$(notdir $(CURDIR)) golangci/golangci-lint:latest-alpine golangci-lint run ./...
 
 fmt:
 	gofmt -l .
 
 up:
-	docker compose -f deploy/docker-compose.yml up -d
+	docker compose -f deploy/docker-compose.yml --profile app up -d --build
 
 down:
 	docker compose -f deploy/docker-compose.yml down -v
