@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -34,6 +35,8 @@ const (
 	maxReasonBytes = 255
 	// approvalAttempts задает число попыток при конфликте версии состояния.
 	approvalAttempts = 3
+	// sagaContinuationTimeout ограничивает best-effort шаг саги после апрува.
+	sagaContinuationTimeout = 5 * time.Second
 )
 
 // ApprovalStore описывает операции, нужные сервису апрува: транзакция голоса,
@@ -56,10 +59,11 @@ type ApprovalStore interface {
 // ApprovalService подтверждает или отклоняет выплату голосом оператора:
 // двухэтапность - требуемое политикой число различных операторов (10.5).
 type ApprovalService struct {
-	store    ApprovalStore
-	policy   domain.ApprovalPolicy
-	log      *zap.Logger
-	attempts int
+	store        ApprovalStore
+	policy       domain.ApprovalPolicy
+	log          *zap.Logger
+	attempts     int
+	continuation func(ctx context.Context, payoutID string)
 }
 
 // ApprovalOption настраивает ApprovalService.
@@ -68,6 +72,12 @@ type ApprovalOption func(*ApprovalService)
 // WithApprovalPolicy задает политику порогов апрува.
 func WithApprovalPolicy(policy domain.ApprovalPolicy) ApprovalOption {
 	return func(s *ApprovalService) { s.policy = policy }
+}
+
+// WithApprovalContinuation задает продолжение саги после approved (10.2):
+// best-effort - ошибки логируются вызывающим, клиент их не видит.
+func WithApprovalContinuation(continuation func(ctx context.Context, payoutID string)) ApprovalOption {
+	return func(s *ApprovalService) { s.continuation = continuation }
 }
 
 // NewApprovalService создает ApprovalService с политикой по умолчанию
@@ -270,6 +280,14 @@ func (s *ApprovalService) approveOnce(ctx context.Context, payoutID, operatorID 
 			zap.String("payout_id", payoutID),
 			zap.String("state", string(transited)),
 			zap.Int64("state_version", result.StateVersion))
+	}
+	// Продолжение саги: и после перехода в approved, и при идемпотентном
+	// повторе по уже одобренной выплате (шаг мог упасть после голоса).
+	// Отмена клиентского контекста не убивает внешний шаг: свой таймаут.
+	if result.State == string(domain.StateApproved) && s.continuation != nil {
+		continuationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sagaContinuationTimeout)
+		defer cancel()
+		s.continuation(continuationCtx, payoutID)
 	}
 	return result, nil
 }

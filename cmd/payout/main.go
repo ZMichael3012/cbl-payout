@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,9 +25,14 @@ import (
 
 	payoutv1 "github.com/cbl/cbl-protos/gen/go/billing/payout/v1"
 
+	"github.com/cbl/cbl-kit/inbox"
+	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
+	"github.com/cbl/cbl-kit/outbox"
+	"github.com/cbl/cbl-kit/outbox/kafkapub"
 	"github.com/cbl/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-payout/internal/domain"
+	"github.com/cbl/cbl-payout/internal/ledgerclient"
 	"github.com/cbl/cbl-payout/internal/storage"
 	"github.com/cbl/cbl-payout/internal/transport"
 	"github.com/cbl/cbl-payout/internal/usecase"
@@ -74,13 +80,38 @@ func main() {
 		fatal(log, "apply migrations failed", zap.String("dir", migrationsDir), zap.Error(err))
 	}
 
-	repo := storage.NewRepository(db)
+	repo := storage.NewRepository(db, storage.WithEventSink(usecase.NewPayoutEventSink(log)))
 	policy, policyErr := domain.ParseApprovalPolicy(os.Getenv("PAYOUT_APPROVAL_POLICY"))
 	if policyErr != nil {
 		fatal(log, "parse PAYOUT_APPROVAL_POLICY failed", zap.Error(policyErr))
 	}
 	log.Info("payout approval policy configured", zap.String("policy", policy.Describe()))
-	approval := usecase.NewApprovalService(repo, log, usecase.WithApprovalPolicy(policy))
+
+	// Клиент Ledger нужен саге (10.2): без LEDGER_ADDR шаги саги недоступны,
+	// апрув-контур 10.5 работает.
+	var ledgerClient usecase.LedgerClient
+	if ledgerAddr := os.Getenv("LEDGER_ADDR"); ledgerAddr != "" {
+		client, dialErr := ledgerclient.Dial(ledgerAddr)
+		if dialErr != nil {
+			fatal(log, "ledger client failed", zap.Error(dialErr))
+		}
+		defer func() { _ = client.Close() }()
+		ledgerClient = client
+		log.Info("ledger client configured", zap.String("addr", ledgerAddr))
+	} else {
+		log.Warn("LEDGER_ADDR is empty: payout saga steps are disabled")
+	}
+
+	saga := usecase.NewPayoutService(repo, ledgerClient, policy, log)
+	approval := usecase.NewApprovalService(repo, log,
+		usecase.WithApprovalPolicy(policy),
+		usecase.WithApprovalContinuation(func(ctx context.Context, payoutID string) {
+			if _, advanceErr := saga.Advance(ctx, payoutID); advanceErr != nil {
+				log.Warn("payout saga continuation failed",
+					zap.String("payout_id", payoutID),
+					zap.Error(advanceErr))
+			}
+		}))
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -98,8 +129,48 @@ func main() {
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
-	payoutv1.RegisterPayoutServiceServer(grpcSrv, transport.NewPayoutServer(approval))
+	payoutv1.RegisterPayoutServiceServer(grpcSrv, transport.NewPayoutServer(approval, saga))
 	reflection.Register(grpcSrv)
+
+	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
+		brokerList := splitCSV(brokers)
+		publisher, pubErr := kafkapub.New(brokerList)
+		if pubErr != nil {
+			fatal(log, "kafka publisher failed", zap.Error(pubErr))
+		}
+		defer publisher.Close()
+
+		relay := outbox.NewRelay(db, publisher, log)
+		go func() {
+			if runErr := relay.Run(ctx); runErr != nil && !errors.Is(runErr, context.Canceled) {
+				log.Error("outbox relay stopped", zap.Error(runErr))
+			}
+		}()
+
+		consumer := usecase.NewGatewayPayoutConsumer(repo, ledgerClient, log)
+		if ledgerClient == nil {
+			log.Warn("LEDGER_ADDR is empty: verdict events will retry until Ledger is configured")
+		}
+		processor := inbox.NewProcessor(usecase.ConsumerGroupGatewayPayouts, db, inbox.NewGuard(), consumer, publisher,
+			inbox.NewRouter(usecase.TopicGatewayPayoutEvents, 3), log)
+		topic := usecase.TopicGatewayPayoutEvents
+		topics := []string{
+			topic, topic + inbox.RetrySuffix5s, topic + inbox.RetrySuffix1m, topic + inbox.RetrySuffix10m,
+		}
+		runner, runErr := kafkaconsumer.New(brokerList, usecase.ConsumerGroupGatewayPayouts, topics, processor, log)
+		if runErr != nil {
+			fatal(log, "gateway payout consumer failed", zap.Error(runErr))
+		}
+		defer runner.Close()
+		go func() {
+			if consumeErr := runner.Run(ctx); consumeErr != nil && !errors.Is(consumeErr, context.Canceled) {
+				log.Error("gateway payout consumer stopped", zap.Error(consumeErr))
+			}
+		}()
+		log.Info("gateway payout consumer started", zap.String("group", usecase.ConsumerGroupGatewayPayouts))
+	} else {
+		log.Warn("KAFKA_BROKERS is empty: outbox relay and gateway consumer are disabled")
+	}
 
 	grpcListener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
@@ -176,4 +247,17 @@ func getenvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// splitCSV разбирает список значений из переменной окружения через запятую,
+// отбрасывая пустые элементы и пробелы вокруг них.
+func splitCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }

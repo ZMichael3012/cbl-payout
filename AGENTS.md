@@ -16,10 +16,9 @@ Out of scope: другие сервисы платформы; взаимодей
 ## 2. Контракты
 
 - REST: административный /healthz, /readyz
-- gRPC: сервер PayoutService (ApprovePayout реализован в 10.5; CreatePayout/GetPayout
-  отвечают Unimplemented до 10.2)
+- gRPC: сервер PayoutService (CreatePayout/GetPayout - 10.2, ApprovePayout - 10.5)
 - Kafka продюсирует: payout.commands, payout.events (через outbox, 10.2)
-- Kafka потребляет: ledger.events, gateway.payout.events (10.2/10.4)
+- Kafka потребляет: gateway.payout.events (группа `cbl-payout-gateway`; ledger.events - 10.6/10.4)
 - Хранилище: PostgreSQL payout (payouts, payout_transitions, payout_approvals, outbox, inbox)
 
 Контракты заморожены в `cbl-protos` (CF-1 gRPC, CF-2 события), см. `CBL-004`.
@@ -35,6 +34,13 @@ goose, zap). `AutoMigrate` запрещен, миграции только goose
 `(payout_id, operator_id)`), политика порогов - `internal/domain/approval.go`,
 сервис - `internal/usecase/approval.go` (locking read + CAS + откат конфликтной
 попытки), транспорт - `internal/transport/payout_grpc.go`.
+Сага (10.2): `internal/usecase/payout.go` (Create/Get/Advance: Reserve Ledger ->
+reserved -> outbox payout.commands -> sent_to_gateway; компенсация failed ->
+compensated), `internal/usecase/payout_events.go` (конверты payout.events и
+payout.commands), `internal/usecase/gateway_payout_consumer.go` (submitted/
+confirmed/failed, row-лок и привязка вердикта к gateway_payout_id),
+`internal/ledgerclient/ledger.go` (gRPC Ledger, дедлайн 1 с), аккаунт удержания -
+`internal/domain/account_plan.go` (UUIDv5 плана счетов, golden-векторы).
 Матрица переходов - `internal/domain/state.go`, дублируется триггером БД
 (`payouts_transition_guard`); переходы только через `storage.Repository.Transition`/
 `TransitionTx` с CAS по `state_version`. `Create` принудительно ставит `requested`/1 и
@@ -49,13 +55,15 @@ make build        # go build ./...
 make test         # go test ./...
 make test-integration  # integration (testcontainers: PostgreSQL)
 make e2e          # compose-стенд: schema.ps1 (схема и цепочки) + approval.ps1 (grpcurl)
+make test-e2e     # сквозная сага на testcontainers: Kafka+PostgreSQL, фейковый Ledger
 make vet          # go vet ./...
 make lint         # golangci-lint в Docker (контекст services/)
 make up           # docker compose -f deploy/docker-compose.yml --profile app up -d --build
 make down         # docker compose -f deploy/docker-compose.yml down -v
 ```
 
-`make test-e2e` (Kafka+PostgreSQL на testcontainers) возвращается в 10.2 вместе с сагой.
+`make test-e2e` - сквозная сага (Kafka+PostgreSQL на testcontainers, фейковый
+Ledger); compose-стенды сагу не гоняют: в них нет Ledger (KI-payout-10).
 
 ## 5. Порты и окружение
 
@@ -64,8 +72,10 @@ HTTP `8080`, gRPC `9080`, метрики `9280`.
 (обязателен), `MIGRATIONS_DIR` (по умолчанию `./migrations`), `DB_MAX_OPEN_CONNS`
 (по умолчанию 20, потолок 100), `DB_MAX_IDLE_CONNS` (по умолчанию 10),
 `PAYOUT_APPROVAL_POLICY` (JSON ярусов апрува, см. 10.5: fail-safe default 2
-оператора, невалидное значение - отказ старта; меняется только рестартом);
-`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `REDIS_ADDR` подключаются в 10.2/10.4.
+оператора, невалидное значение - отказ старта; меняется только рестартом),
+`LEDGER_ADDR` (gRPC Ledger для саги; пусто - шаг саги недоступен, WARN),
+`KAFKA_BROKERS` (relay outbox и consumer gateway.payout.events; пусто - WARN);
+`SCHEMA_REGISTRY_URL`, `REDIS_ADDR` - 10.4/0.5.
 
 ## 6. Правила разработки
 
@@ -95,14 +105,17 @@ consumer lag; дашборды после задачи 0.7.
 | T-PAYOUT-05 | Данные саги заполняются только переходами (`reserve_id`, `gateway_payout_id`, `provider`, `txid`, `failure_reason`, `completed_at`, `fee_*`); `Create` зачищает переданные значения, INSERT guard их запрещает | тихая подмена контекста саги до апрува невозможна | guardian-логика дублируется в репозитории и триггере | тесты: INSERT с ready-полями отклоняется; `Create` с предзаполненными полями их зачищает |
 | T-PAYOUT-06 | Двухэтапность апрува = два разных оператора (уникальность `(payout_id, operator_id)`), решение оператора неизменяемо (append-only), вето одного достаточно; `required` в голосе - снимок политики, решение - текущей политикой | правило двух человек структурно (повтор идемпотентен, обход через смену решения невозможен); аудит голосов полный | оператор не может передумать после голоса (append-only); прогресс апрува не виден в CF-1 `Payout` (12.2); политика вниз между голосами завершает выплату при повторе | реестр операторов и RBAC - 12.1/12.2; read-контур голосов - 12.2; дрейф вниз обязан учитывать гейт 10.2 (re-gate `requested`) |
 | T-PAYOUT-07 | Политика порогов апрува (10.5) с fail-safe: без настройки - два оператора, нулевое значение структуры не «выключает» апрув; строгий разбор JSON (обязательные поля, запрет `null`/неизвестных полей) и отказ старта при опечатке | опечатка в конфигурации не отключает ручное подтверждение выплат; конфигурируемость без релиза | жёсткость: любое изменение формата - через рестарт и лог `Describe`; `default:0` (легальный) требует осознанного решения оператора | лог старта `payout approval policy configured`; алерт на `default=0` при дежурстве (runbook); пороги по USD-эквиваленту вручную, как у 4.5 |
+| T-PAYOUT-08 | Сага (10.2): порядок «внешняя идемпотентная операция Ledger -> CAS-переход»; в consumer-е внешний вызов выполняется внутри транзакции Guard, выплата читается под row-локом; вердикт шлюза обязан нести `gateway_payout_id`, совпадающий с зафиксированным `submitted` | терминализация не опережает внешний шаг; конкурентные confirmed/failed сериализуются (commit и release не перемешиваются); повторы безопасны (ключи reserve/commit/release) | транзакция Guard удерживается до 1 с на вызов Ledger (до ~3 с с повторами), throughput consumer-а ограничен Ledger; вердикт до `submitted` уходит в DLQ (потерянный submitted - ручной разбор, KI-payout-10) | эмиссия команды и переход в `sent_to_gateway` одной транзакцией; повторы плана до 3; DLQ-алерт в runbook; при росте нагрузки - двухфазная схема как в kit T-KK5 |
 
 ## 9. Known issues
 
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-payout-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
-| KI-payout-02 | Нет mTLS и authN на gRPC PayoutService (9080) и топиках `payout.commands`/`payout.events`: с 10.5 любой участник доверенной сети вызывает `ApprovePayout` с произвольными `operator_id` и (а) набирает кворум двух «операторов» для любой крупной `requested`-выплаты, (б) одним `approve=false` необратимо отклоняет чужую выплату (rejected терминален, события rejected в CF-2 нет), (в) получает в ответе полный `Payout` (сумма, адрес) и перечисляет выплаты через NotFound; с 10.2 - движение денег (кросс-ссылки KI-ledger-02, KI-payment-04) | prod-выкладка запрещена; gRPC и топики не публиковать за доверенную сеть | mTLS/авторизация (0.5/0.6), ACL на топики; RBAC операторов (реестр, кто вправе апрувить) - 12.1/12.2; разбор инцидента - runbook (сверка operator_id с реестром) | open |
+| KI-payout-02 | Нет mTLS и authN на gRPC PayoutService (9080) и топиках: с 10.2 `CreatePayout` любого `merchant_id` создает выплату и резервирует средства чужого мерчанта (Reserve в Ledger), `GetPayout` отдает полный Payout; `ApprovePayout` (10.5) с произвольными `operator_id` набирает кворум или необратимо отклоняет; produce в `gateway.payout.events` позволяет подтвердить/компенсировать чужую `sent_to_gateway`-выплату без реальной отправки (привязка к `gateway_payout_id` - только второй барьер; подделанный `submitted` его перекрывает); `payout.commands` позволяет подделывать команды шлюзу (кросс-ссылки KI-ledger-02, KI-payment-04) | prod-выкладка запрещена; gRPC и топики не публиковать за доверенную сеть | mTLS/авторизация 0.5/0.6; ACL: produce `gateway.payout.events` только Connector, `payout.commands` только cbl-payout; RBAC операторов - 12.1/12.2; разбор инцидентов - runbook | open |
 | KI-payout-09 | В CF-1 `ApprovePayoutRequest` нет `idempotency_key`: идемпотентность опирается на строку голоса `(payout_id, operator_id)`; при исчерпании CAS-повторов клиент (12.2) обязан повторить вызов, иначе голос тихо теряется | повторная доставка безопасна для того же оператора; сетевые сбои требуют retry-политики клиента | расширение контракта ключом - вопрос владельца CF при 12.2; в runbook: `Aborted` = повторить вызов | open |
+| KI-payout-10 | Нет фонового восстановления зависших саг: `requested`/`approved` без движения (сбой Reserve), `failed` без компенсации, «orphan» active-резерв после сбоя между Reserve и транзакцией записи, вердикт до `submitted` (DLQ) | выплата или удержание зависает до ручного вмешательства; в compose-стендах Ledger нет - сага недоступна | 10.4 (перепроверка статуса) и 10.7 (хаос-тесты/восстановление); до этого - возобновление повтором Create/Approve и runbook | open |
+| KI-payout-11 | `provider` выплаты не заполняется: CF-2 `GatewayPayoutEvent` не несет провайдера, `submitted` фиксирует только `gateway_payout_id`/`txid` | `payouts.provider` и поле provider в `payout.events` пусты (влияет на Reconciler 9.x/отчетность) | заполнение в 10.4 (перепроверка статуса/маршрут) или расширение CF-2 владельцем контракта | open |
 | KI-payout-03 | Рантайм и миграции под одним DSN: владелец схемы может снять триггеры второго барьера | в dev-контуре барьер снимается владельцем БД (как KI-payment-03) | разделение ролей migrator/runtime при выходе в prod (0.4/0.6) | open |
 | KI-payout-04 | Нет ретеншена и партиционирования `payouts`, `payout_transitions`, `outbox` | рост БД и бэкапов | задача 14.2 (как KI-ledger-09, KI-payment-02) | open |
 | KI-payout-05 | `account_id` счета выплат (UUIDv5 плана счетов) в 10.2 воспроизводится по golden-векторам (KI-ledger-08) | риск дрейфа с леджером | перенос вывода в cbl-kit до 10.2/7.4; векторы обязательны в тестах | open |
@@ -115,7 +128,8 @@ consumer lag; дашборды после задачи 0.7.
 | CBL | Дата | Статус | Спека | Коммит |
 | :-- | :-- | :-- | :-- | :-- |
 | CBL-10.1 | 2026-10-15 | done, ревью закрыто (схема payouts/payout_transitions, автомат с двойным барьером и CAS, `reserve_id`, e2e обе цепочки, покрытие 91.6%) | `.specs/CBL-10.1-payout-schema.md` | fcd3b8a |
-| CBL-10.5 | 2026-10-15 | done, ревью закрыто (политика порогов апрува с fail-safe, журнал голосов append-only, два разных оператора и вето, gRPC ApprovePayout, e2e grpcurl, покрытие 90.5%) | `.specs/CBL-10.5-approvals.md` | этот коммит |
+| CBL-10.5 | 2026-10-15 | done, ревью закрыто (политика порогов апрува с fail-safe, журнал голосов append-only, два разных оператора и вето, gRPC ApprovePayout, e2e grpcurl, покрытие 90.5%) | `.specs/CBL-10.5-approvals.md` | 8a6e49a |
+| CBL-10.2 | 2026-10-15 | done, ревью закрыто (сага: резерв Ledger из golden-векторов, payout.commands через outbox, consumer gateway.payout.events с привязкой вердикта, commit/release, компенсация, continuation апрува, e2e Kafka) | `.specs/CBL-10.2-saga.md` | этот коммит |
 
 ## 11. Runbook
 
@@ -151,3 +165,27 @@ consumer lag; дашборды после задачи 0.7.
 4. `requested`-выплата без голосов дольше SLA - проверить политику в логе
    старта и число голосов; добить голосом через `ApprovePayout` (Back-office
    12.2); после mTLS (0.5/0.6) сверять операторов с реестром (KI-payout-02).
+
+Сага (10.2):
+
+1. Состояние выплаты: `SELECT state, state_version, reserve_id, gateway_payout_id,
+   provider, failure_reason FROM payouts WHERE id = '...'`; журнал -
+   `payout_transitions ORDER BY state_version`. Outbox: неопубликованные строки
+   `SELECT id, topic, headers->>'event_type' FROM outbox WHERE published_at IS
+   NULL ORDER BY id` (без Kafka копятся, KI-payout-04/02).
+2. Вердикт ушел в DLQ `gateway.payout.events.dlq`: причина в `x-error`; типовые -
+   вердикт до `submitted` или чужой `gateway_payout_id` (привязка), невалидная
+   fee/строки. Разбор: сверить `gateway_payout_id`/`txid` с Connector; повтор
+   возможен только после устранения причины (ручной replay, 10.4).
+3. Зависшая `requested`/`approved` (нет движения): проверить `LEDGER_ADDR`,
+   лог `payout saga continuation failed`; повтор `CreatePayout`/`ApprovePayout`
+   с тем же ключом возобновляет сагу; фоновое восстановление - KI-payout-10
+   (10.4/10.7). `ErrLedgerUnavailable` - Ledger недоступен, повторить.
+4. `failed` без `compensated` (удержание не освобождено): приоритетный разбор;
+   release идемпотентен (`payout:{id}:release`), доводится повтором события или
+   операторской процедурой 10.7; «orphan» active-резерв в Ledger по `ref_id`
+   выплаты - KI-payout-10.
+5. Подозрительное завершение/компенсация (KI-payout-02): сверить
+   `gateway_payout_id`/`txid` с Connector; при подтвержденной подделке - разбор
+   инцидента (доступ к топику/gRPC), денежные исправления - только сторно
+   (10.x); prod запрещен до ACL/mTLS (0.5/0.6).

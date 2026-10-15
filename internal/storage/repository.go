@@ -123,12 +123,20 @@ type TransitionPatch struct {
 
 // Repository читает и изменяет выплаты в PostgreSQL.
 type Repository struct {
-	db *gorm.DB
+	db        *gorm.DB
+	eventSink TransitionEventSink
 }
 
+// Option настраивает Repository.
+type Option func(*Repository)
+
 // NewRepository создает Repository.
-func NewRepository(db *gorm.DB) *Repository {
-	return &Repository{db: db}
+func NewRepository(db *gorm.DB, opts ...Option) *Repository {
+	repo := &Repository{db: db}
+	for _, opt := range opts {
+		opt(repo)
+	}
+	return repo
 }
 
 // Create создает выплату в состоянии requested и записывает переход версии 1
@@ -165,7 +173,17 @@ func (r *Repository) Create(ctx context.Context, payout Payout) error {
 			Reason:       "created",
 			OccurredAt:   now,
 		}
-		return tx.Create(&history).Error
+		if createErr := tx.Create(&history).Error; createErr != nil {
+			return createErr
+		}
+		// Создание - бизнес-веха payout.requested (CF-2): событие пишется
+		// в той же транзакции, что и запись выплаты.
+		return r.emitTransitionEvent(ctx, tx, TransitionEvent{
+			Payout:     payout,
+			From:       "",
+			To:         domain.StateRequested,
+			OccurredAt: now,
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("storage: create payout: %w", err)
@@ -233,12 +251,41 @@ func (r *Repository) TransitionTx(ctx context.Context, tx *gorm.DB, id string, e
 		if createErr := tx.Create(&history).Error; createErr != nil {
 			return createErr
 		}
-		return tx.Where("id = ?", id).First(&updated).Error
+		if loadErr := tx.Where("id = ?", id).First(&updated).Error; loadErr != nil {
+			return loadErr
+		}
+		return r.emitTransitionEvent(ctx, tx, TransitionEvent{
+			Payout:     updated,
+			From:       from,
+			To:         to,
+			OccurredAt: history.OccurredAt,
+		})
 	})
 	if err != nil {
 		return Payout{}, fmt.Errorf("storage: transition payout %s: %w", id, err)
 	}
 	return updated, nil
+}
+
+// PayoutByMerchantKey возвращает выплату мерчанта по ключу идемпотентности:
+// повтор CreatePayout сверяет request_hash и возвращает прежний результат.
+func (r *Repository) PayoutByMerchantKey(ctx context.Context, merchantID, idempotencyKey string) (Payout, error) {
+	var payout Payout
+	err := r.db.WithContext(ctx).
+		Where("merchant_id = ? AND idempotency_key = ?", merchantID, idempotencyKey).
+		First(&payout).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Payout{}, fmt.Errorf("%w: merchant %s key %s", ErrNotFound, merchantID, idempotencyKey)
+	}
+	if err != nil {
+		return Payout{}, fmt.Errorf("storage: payout by merchant key: %w", err)
+	}
+	return payout, nil
+}
+
+// Payout возвращает выплату без истории переходов.
+func (r *Repository) Payout(ctx context.Context, id string) (Payout, error) {
+	return r.PayoutTx(ctx, nil, id)
 }
 
 // PayoutTx возвращает выплату без истории переходов в переданной транзакции

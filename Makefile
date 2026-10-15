@@ -1,4 +1,4 @@
-.PHONY: build test test-integration e2e vet lint fmt up down
+.PHONY: build test test-integration e2e test-e2e vet lint fmt up down
 
 build:
 	go build ./...
@@ -12,6 +12,9 @@ test-integration:
 e2e:
 	powershell -NoProfile -File test/e2e/schema.ps1
 	powershell -NoProfile -File test/e2e/approval.ps1
+
+test-e2e:
+	go test -tags e2e -count=1 -timeout 12m ./test/e2e/...
 
 vet:
 	go vet ./...

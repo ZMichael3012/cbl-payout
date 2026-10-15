@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
 	payoutv1 "github.com/cbl/cbl-protos/gen/go/billing/payout/v1"
 
 	"github.com/cbl/cbl-payout/internal/domain"
@@ -35,6 +36,22 @@ func (f *fakeDecider) Approve(_ context.Context, payoutID, operatorID string, ap
 	f.gotOp = operatorID
 	f.gotApprov = approve
 	f.gotReason = reason
+	return f.payout, f.err
+}
+
+// fakeSaga подменяет операции саги.
+type fakeSaga struct {
+	payout storage.Payout
+	err    error
+}
+
+// Create возвращает заданный результат.
+func (f *fakeSaga) Create(context.Context, usecase.CreatePayoutInput) (storage.Payout, error) {
+	return f.payout, f.err
+}
+
+// Get возвращает заданный результат.
+func (f *fakeSaga) Get(context.Context, string) (storage.Payout, error) {
 	return f.payout, f.err
 }
 
@@ -63,7 +80,7 @@ func TestApprovePayoutSuccessMapping(t *testing.T) {
 		FeeDecimals:        &feeDecimals,
 		CreatedAt:          time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC),
 	}}
-	server := transport.NewPayoutServer(decider)
+	server := transport.NewPayoutServer(decider, &fakeSaga{})
 
 	response, err := server.ApprovePayout(context.Background(), &payoutv1.ApprovePayoutRequest{
 		PayoutId:   "p-1",
@@ -107,19 +124,58 @@ func TestApprovePayoutErrorMapping(t *testing.T) {
 		{errors.New("boom"), codes.Internal},
 	}
 	for _, tc := range cases {
-		server := transport.NewPayoutServer(&fakeDecider{err: tc.err})
+		server := transport.NewPayoutServer(&fakeDecider{err: tc.err}, &fakeSaga{})
 		_, err := server.ApprovePayout(context.Background(), &payoutv1.ApprovePayoutRequest{PayoutId: "p-1", OperatorId: "op-1"})
 		require.Error(t, err)
 		assert.Equalf(t, tc.code, status.Code(err), "ошибка %v", tc.err)
 	}
 }
 
-func TestPayoutServerUnimplementedUntilTransport(t *testing.T) {
+func TestCreatePayoutValidationAndErrors(t *testing.T) {
 	t.Parallel()
 
-	server := transport.NewPayoutServer(&fakeDecider{})
+	server := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{})
+
+	// Без amount - InvalidArgument.
 	_, err := server.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{MerchantId: "m-1"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "CreatePayout появится в 10.2")
-	_, err = server.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "GetPayout появится в 10.2")
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	// Конфликт ключа идемпотентности - AlreadyExists.
+	conflict := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: usecase.ErrIdempotencyConflict})
+	_, err = conflict.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
+		MerchantId: "m-1",
+		Amount:     &commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2},
+	})
+	assert.Equal(t, codes.AlreadyExists, status.Code(err))
+
+	// Сага недоступна - FailedPrecondition.
+	unavailable := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: usecase.ErrSagaUnavailable})
+	_, err = unavailable.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
+		MerchantId: "m-1",
+		Amount:     &commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2},
+	})
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	// GetPayout: выплата не найдена.
+	notFound := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: storage.ErrNotFound})
+	_, err = notFound.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestCreatePayoutSuccessMapping(t *testing.T) {
+	t.Parallel()
+
+	saga := &fakeSaga{payout: storage.Payout{ID: "p-1", State: string(domain.StateSentToGateway), StateVersion: 4}}
+	server := transport.NewPayoutServer(&fakeDecider{}, saga)
+
+	response, err := server.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
+		IdempotencyKey:     "key-1",
+		MerchantId:         "m-1",
+		Amount:             &commonv1.Money{MinorUnits: 500_000, Asset: "USDT", Decimals: 2},
+		Network:            "trc20",
+		DestinationAddress: "Taddr",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "p-1", response.GetPayoutId())
+	assert.Equal(t, payoutv1.PayoutState_PAYOUT_STATE_SENT_TO_GATEWAY, response.GetState())
 }

@@ -290,6 +290,40 @@ func TestApprovalServiceInputValidation(t *testing.T) {
 	require.ErrorIs(t, err, usecase.ErrInvalidApprovalInput)
 }
 
+func TestApprovalContinuationRunsOnApproved(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeApprovalStore(5_000_000)
+	continued := make([]string, 0, 1)
+	service := usecase.NewApprovalService(store, zap.NewNop(),
+		usecase.WithApprovalPolicy(approvalPolicy(t, `{"default":1}`)),
+		usecase.WithApprovalContinuation(func(_ context.Context, payoutID string) {
+			continued = append(continued, payoutID)
+		}))
+
+	_, err := service.Approve(context.Background(), store.payout.ID, "op-1", true, "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{store.payout.ID}, continued, "сага продолжается после approved")
+
+	// Идемпотентный повтор одобренной выплаты тоже дергает continuation:
+	// шаг мог упасть после голоса.
+	_, err = service.Approve(context.Background(), store.payout.ID, "op-1", true, "")
+	require.NoError(t, err)
+	assert.Len(t, continued, 2)
+
+	// Отклонение continuation не запускает.
+	other := newFakeApprovalStore(5_000_000)
+	rejected := make([]string, 0, 1)
+	rejectService := usecase.NewApprovalService(other, zap.NewNop(),
+		usecase.WithApprovalPolicy(approvalPolicy(t, `{"default":1}`)),
+		usecase.WithApprovalContinuation(func(_ context.Context, payoutID string) {
+			rejected = append(rejected, payoutID)
+		}))
+	_, err = rejectService.Approve(context.Background(), other.payout.ID, "op-1", false, "sanctions")
+	require.NoError(t, err)
+	assert.Empty(t, rejected)
+}
+
 func TestApprovalServiceConflictRetry(t *testing.T) {
 	t.Parallel()
 
