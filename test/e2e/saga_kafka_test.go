@@ -307,6 +307,62 @@ func TestSagaKafkaFlow(t *testing.T) {
 	})
 	waitForState(t, ctx, repo, failedPayout.ID, domain.StateCompensated)
 	assert.Contains(t, ledger.releases, "reserve-"+failedPayout.ID)
+
+	// 5. Возврат (CBL-10.6): тот же путь саги, события несут refund_invoice_id.
+	refundInput := in
+	refundInput.IdempotencyKey = "saga-e2e-refund"
+	refundInput.RefundInvoiceID = uuid.Must(uuid.NewV7()).String()
+	refundPayout, err := saga.Create(ctx, refundInput)
+	require.NoError(t, err)
+	require.NotNil(t, refundPayout.RefundInvoiceID)
+
+	produceGatewayEvent(t, ctx, producer, &eventsv1.GatewayPayoutEvent{
+		PayoutId:        refundPayout.ID,
+		GatewayPayoutId: "gw-refund",
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED,
+	})
+	waitForStateVersion(t, ctx, repo, refundPayout.ID, 4)
+	produceGatewayEvent(t, ctx, producer, &eventsv1.GatewayPayoutEvent{
+		PayoutId:        refundPayout.ID,
+		GatewayPayoutId: "gw-refund",
+		Txid:            "tx-refund",
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
+	})
+	waitForState(t, ctx, repo, refundPayout.ID, domain.StateCompleted)
+
+	refundEvent := waitForPayoutEvent(t, ctx, brokers, refundPayout.ID, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED)
+	assert.Equal(t, *refundPayout.RefundInvoiceID, refundEvent.GetRefundInvoiceId(), "маркер возврата в событиях")
+}
+
+// waitForPayoutEvent ждет в payout.events событие выплаты заданного типа.
+func waitForPayoutEvent(t *testing.T, ctx context.Context, brokers []string, payoutID string, want eventsv1.PayoutEventType) *eventsv1.PayoutEvent {
+	t.Helper()
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumeTopics(usecase.TopicPayoutEvents),
+		kgo.ConsumerGroup("e2e-wait-"+uuid.Must(uuid.NewV7()).String()),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+	)
+	require.NoError(t, err)
+	defer consumer.Close()
+
+	for {
+		fetches := consumer.PollFetches(ctx)
+		if fetchErr := fetches.Err(); fetchErr != nil {
+			require.FailNow(t, "poll payout.events failed", fetchErr.Error(), payoutID)
+		}
+		var found *eventsv1.PayoutEvent
+		fetches.EachRecord(func(record *kgo.Record) {
+			payload := &eventsv1.PayoutEvent{}
+			if unmarshalErr := proto.Unmarshal(record.Value, payload); unmarshalErr == nil &&
+				payload.GetPayoutId() == payoutID && payload.GetType() == want {
+				found = payload
+			}
+		})
+		if found != nil {
+			return found
+		}
+	}
 }
 
 // waitForStateVersion ждет версию состояния (маркер применения submitted).

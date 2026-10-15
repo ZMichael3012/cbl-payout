@@ -54,6 +54,9 @@ type Payout struct {
 	DestinationAddress string `gorm:"column:destination_address"`
 	// MerchantRef задает ссылку мерчанта для корреляции (возвраты 10.6).
 	MerchantRef string `gorm:"column:merchant_ref"`
+	// RefundInvoiceID задает исходный счет возврата: непустое значение
+	// означает, что выплата является возвратом (CBL-10.6).
+	RefundInvoiceID *string `gorm:"column:refund_invoice_id"`
 	// ReserveID задает идентификатор удержания Ledger (шаг саги reserved, 10.2).
 	ReserveID *string `gorm:"column:reserve_id"`
 	// GatewayPayoutID задает идентификатор выплаты в шлюзе.

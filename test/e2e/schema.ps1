@@ -1,6 +1,6 @@
 # E2E CBL-10.1: схема выплаты и автомат состояний на compose-стенде payout.
 # Запуск из каталога сервиса: powershell -NoProfile -File test/e2e/schema.ps1
-# Сценарий: compose up -> миграции (версия 4) -> основная цепочка
+# Сценарий: compose up -> миграции (версия 5) -> основная цепочка
 # requested -> reserved -> sent_to_gateway -> completed и компенсационная
 # requested -> approved -> reserved -> failed -> compensated,
 # запрещенные переходы и append-only журнал отклоняются вторым барьером БД.
@@ -54,7 +54,7 @@ try {
     foreach ($attempt in 1..30) {
         try {
             $version = Invoke-Psql "SELECT max(version_id) FROM goose_db_version"
-            if ($version -eq "4") { $migrated = $true; break }
+            if ([int]$version -ge 5) { $migrated = $true; break }
         } catch {
             Start-Sleep -Seconds 2
         }

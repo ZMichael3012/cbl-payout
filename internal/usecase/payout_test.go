@@ -2,6 +2,9 @@ package usecase_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,6 +301,80 @@ func TestCreatePayoutIdempotentReplay(t *testing.T) {
 	changed.AmountMinor = 200_000
 	_, err = service.Create(context.Background(), changed)
 	require.ErrorIs(t, err, usecase.ErrIdempotencyConflict)
+}
+
+func TestCreatePayoutRefund(t *testing.T) {
+	t.Parallel()
+
+	ledger := &fakeLedger{}
+	service, store := sagaFixture(t, `{"default":0}`, ledger)
+
+	refundInvoice := uuid.Must(uuid.NewV7()).String()
+	in := smallPayoutInput()
+	in.RefundInvoiceID = strings.ToUpper(refundInvoice) // недоверенный регистр
+	payout, err := service.Create(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, string(domain.StateSentToGateway), payout.State, "возврат идет тем же путем саги")
+	require.NotNil(t, payout.RefundInvoiceID)
+	assert.Equal(t, refundInvoice, *payout.RefundInvoiceID, "идентификатор счета канонизирован")
+
+	// Возврат и обычная выплата с тем же телом, но без счета, - разные тела.
+	plain := smallPayoutInput()
+	plain.IdempotencyKey = in.IdempotencyKey
+	_, err = service.Create(context.Background(), plain)
+	require.ErrorIs(t, err, usecase.ErrIdempotencyConflict, "маркер возврата входит в request_hash")
+
+	// Невалидный идентификатор счета отклоняется до создания.
+	for name, badRefund := range map[string]string{
+		"not uuid":   "not-a-uuid",
+		"nil uuid":   uuid.Nil.String(),
+		"whitespace": "   ",
+	} {
+		bad := smallPayoutInput()
+		bad.IdempotencyKey = "refund-bad-" + name
+		bad.RefundInvoiceID = badRefund
+		_, err = service.Create(context.Background(), bad)
+		require.ErrorIsf(t, err, usecase.ErrInvalidPayoutInput, "маркер %q", badRefund)
+	}
+	assert.Len(t, store.payouts, 1, "невалидные возвраты не создают выплату")
+}
+
+func TestCreatePayoutLegacyHashCompatibility(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSagaStore()
+	policy, err := domain.ParseApprovalPolicy(`{"default":0}`)
+	require.NoError(t, err)
+	service := usecase.NewPayoutService(store, &fakeLedger{}, policy, zap.NewNop())
+
+	in := smallPayoutInput()
+	// Строка, созданная до 10.6: хэш формата без маркера возврата.
+	legacyCanonical := "3:m-1" + "6:100000" + "4:USDT" + "1:2" + "5:trc20" +
+		"34:TJRabPrwbZy45sbavfcjinPJC18kjpRTv8" + "5:ref-1"
+	sum := sha256.Sum256([]byte(legacyCanonical))
+	legacyHash := hex.EncodeToString(sum[:])
+
+	id := uuid.Must(uuid.NewV7()).String()
+	legacy := storage.Payout{
+		ID:                 id,
+		MerchantID:         in.MerchantID,
+		IdempotencyKey:     in.IdempotencyKey,
+		RequestHash:        legacyHash,
+		State:              string(domain.StateSentToGateway),
+		StateVersion:       3,
+		AmountMinor:        in.AmountMinor,
+		AmountAsset:        "USDT",
+		AmountDecimals:     2,
+		Network:            in.Network,
+		DestinationAddress: in.DestinationAddress,
+		MerchantRef:        in.MerchantRef,
+	}
+	store.payouts[id] = &legacy
+	store.byKey[in.MerchantID+"|"+in.IdempotencyKey] = id
+
+	result, err := service.Create(context.Background(), in)
+	require.NoError(t, err, "хэш обычной выплаты до 10.6 совпадает: повтор идемпотентен")
+	assert.Equal(t, id, result.ID)
 }
 
 func TestCreatePayoutHashSeparatesFieldBoundaries(t *testing.T) {

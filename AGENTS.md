@@ -16,12 +16,15 @@ Out of scope: другие сервисы платформы; взаимодей
 ## 2. Контракты
 
 - REST: административный /healthz, /readyz
-- gRPC: сервер PayoutService (CreatePayout/GetPayout - 10.2, ApprovePayout - 10.5)
-- Kafka продюсирует: payout.commands, payout.events (через outbox, 10.2)
-- Kafka потребляет: gateway.payout.events (группа `cbl-payout-gateway`; ledger.events - 10.6/10.4)
+- gRPC: сервер PayoutService (CreatePayout/GetPayout - 10.2, ApprovePayout - 10.5;
+  CreatePayout принимает refund_invoice_id - возврат, 10.6)
+- Kafka продюсирует: payout.commands, payout.events (через outbox, 10.2;
+  события возвратов несут refund_invoice_id, 10.6)
+- Kafka потребляет: gateway.payout.events (группа `cbl-payout-gateway`; ledger.events - 10.4/10.7)
 - Хранилище: PostgreSQL payout (payouts, payout_transitions, payout_approvals, outbox, inbox)
 
-Контракты заморожены в `cbl-protos` (CF-1 gRPC, CF-2 события), см. `CBL-004`.
+Контракты заморожены в `cbl-protos`: CF-1 gRPC, CF-2 события + аддитивные поля
+возвратов `cbl-protos@cf-2.1` (CBL-10.6); см. `CBL-004`.
 
 ## 3. Архитектура
 
@@ -41,6 +44,9 @@ payout.commands), `internal/usecase/gateway_payout_consumer.go` (submitted/
 confirmed/failed, row-лок и привязка вердикта к gateway_payout_id),
 `internal/ledgerclient/ledger.go` (gRPC Ledger, дедлайн 1 с), аккаунт удержания -
 `internal/domain/account_plan.go` (UUIDv5 плана счетов, golden-векторы).
+Возвраты (10.6): `payouts.refund_invoice_id` (миграция 00005: CHECK канонического
+UUID, частичный индекс, неизменяемость вторым барьером), канонизация и включение
+в `request_hash` только при непустом значении, маркер в каждом `payout.events`.
 Матрица переходов - `internal/domain/state.go`, дублируется триггером БД
 (`payouts_transition_guard`); переходы только через `storage.Repository.Transition`/
 `TransitionTx` с CAS по `state_version`. `Create` принудительно ставит `requested`/1 и
@@ -106,13 +112,14 @@ consumer lag; дашборды после задачи 0.7.
 | T-PAYOUT-06 | Двухэтапность апрува = два разных оператора (уникальность `(payout_id, operator_id)`), решение оператора неизменяемо (append-only), вето одного достаточно; `required` в голосе - снимок политики, решение - текущей политикой | правило двух человек структурно (повтор идемпотентен, обход через смену решения невозможен); аудит голосов полный | оператор не может передумать после голоса (append-only); прогресс апрува не виден в CF-1 `Payout` (12.2); политика вниз между голосами завершает выплату при повторе | реестр операторов и RBAC - 12.1/12.2; read-контур голосов - 12.2; дрейф вниз обязан учитывать гейт 10.2 (re-gate `requested`) |
 | T-PAYOUT-07 | Политика порогов апрува (10.5) с fail-safe: без настройки - два оператора, нулевое значение структуры не «выключает» апрув; строгий разбор JSON (обязательные поля, запрет `null`/неизвестных полей) и отказ старта при опечатке | опечатка в конфигурации не отключает ручное подтверждение выплат; конфигурируемость без релиза | жёсткость: любое изменение формата - через рестарт и лог `Describe`; `default:0` (легальный) требует осознанного решения оператора | лог старта `payout approval policy configured`; алерт на `default=0` при дежурстве (runbook); пороги по USD-эквиваленту вручную, как у 4.5 |
 | T-PAYOUT-08 | Сага (10.2): порядок «внешняя идемпотентная операция Ledger -> CAS-переход»; в consumer-е внешний вызов выполняется внутри транзакции Guard, выплата читается под row-локом; вердикт шлюза обязан нести `gateway_payout_id`, совпадающий с зафиксированным `submitted` | терминализация не опережает внешний шаг; конкурентные confirmed/failed сериализуются (commit и release не перемешиваются); повторы безопасны (ключи reserve/commit/release) | транзакция Guard удерживается до 1 с на вызов Ledger (до ~3 с с повторами), throughput consumer-а ограничен Ledger; вердикт до `submitted` уходит в DLQ (потерянный submitted - ручной разбор, KI-payout-10) | эмиссия команды и переход в `sent_to_gateway` одной транзакцией; повторы плана до 3; DLQ-алерт в runbook; при росте нагрузки - двухфазная схема как в kit T-KK5 |
+| T-PAYOUT-09 | Возврат (10.6) - поле `refund_invoice_id`, а не отдельный тип: автомат и сага общие (CBL-000: «частный случай выплаты»); Notification различает `refund.*` по маркеру | нет новых состояний/ветвлений, общие гарантии идемпотентности и компенсации; часть контракта (аддитивные поля, `cf-2.1`) | Payout не проверяет существование/владельца счета и остаток (нет данных - database-per-service): агрегация остатка и ownership обязательны в Billing API 7.x; произвольный маркер при неаутентифицированном CreatePayout - KI-payout-02 | реестр/проверка остатка - 7.x (спека 7.4); типы `refund.*` - 8.x; маркер неизменяем вторым барьером; канонизация UUID и связь с request_hash |
 
 ## 9. Known issues
 
 | ID | Проблема | Влияние | План | Статус |
 | :-- | :-- | :-- | :-- | :-- |
 | KI-payout-01 | CI и pre-commit не настроены | линтеры запускаются вручную | задача 0.2 | open |
-| KI-payout-02 | Нет mTLS и authN на gRPC PayoutService (9080) и топиках: с 10.2 `CreatePayout` любого `merchant_id` создает выплату и резервирует средства чужого мерчанта (Reserve в Ledger), `GetPayout` отдает полный Payout; `ApprovePayout` (10.5) с произвольными `operator_id` набирает кворум или необратимо отклоняет; produce в `gateway.payout.events` позволяет подтвердить/компенсировать чужую `sent_to_gateway`-выплату без реальной отправки (привязка к `gateway_payout_id` - только второй барьер; подделанный `submitted` его перекрывает); `payout.commands` позволяет подделывать команды шлюзу (кросс-ссылки KI-ledger-02, KI-payment-04) | prod-выкладка запрещена; gRPC и топики не публиковать за доверенную сеть | mTLS/авторизация 0.5/0.6; ACL: produce `gateway.payout.events` только Connector, `payout.commands` только cbl-payout; RBAC операторов - 12.1/12.2; разбор инцидентов - runbook | open |
+| KI-payout-02 | Нет mTLS и authN на gRPC PayoutService (9080) и топиках: с 10.2 `CreatePayout` любого `merchant_id` создает выплату и резервирует средства чужого мерчанта (Reserve в Ledger), `GetPayout` отдает полный Payout; с 10.6 `CreatePayout` с произвольным `refund_invoice_id` инициирует `refund.*` уведомления мерчанту со чужим/выдуманным счетом, а `GetPayout` раскрывает чужой маркер (Payout не проверяет существование и владельца счета - обязанность 7.x); `ApprovePayout` (10.5) с произвольными `operator_id` набирает кворум или необратимо отклоняет; produce в `gateway.payout.events` позволяет подтвердить/компенсировать чужую `sent_to_gateway`-выплату без реальной отправки (привязка к `gateway_payout_id` - только второй барьер; подделанный `submitted` его перекрывает); `payout.commands` позволяет подделывать команды шлюзу (кросс-ссылки KI-ledger-02, KI-payment-04) | prod-выкладка запрещена; gRPC и топики не публиковать за доверенную сеть | mTLS/авторизация 0.5/0.6; ACL: produce `gateway.payout.events` только Connector, `payout.commands` только cbl-payout; RBAC операторов - 12.1/12.2; ownership `refund_invoice_id` и остаток счета - 7.x; разбор инцидентов - runbook | open |
 | KI-payout-09 | В CF-1 `ApprovePayoutRequest` нет `idempotency_key`: идемпотентность опирается на строку голоса `(payout_id, operator_id)`; при исчерпании CAS-повторов клиент (12.2) обязан повторить вызов, иначе голос тихо теряется | повторная доставка безопасна для того же оператора; сетевые сбои требуют retry-политики клиента | расширение контракта ключом - вопрос владельца CF при 12.2; в runbook: `Aborted` = повторить вызов | open |
 | KI-payout-10 | Нет фонового восстановления зависших саг: `requested`/`approved` без движения (сбой Reserve), `failed` без компенсации, «orphan» active-резерв после сбоя между Reserve и транзакцией записи, вердикт до `submitted` (DLQ) | выплата или удержание зависает до ручного вмешательства; в compose-стендах Ledger нет - сага недоступна | 10.4 (перепроверка статуса) и 10.7 (хаос-тесты/восстановление); до этого - возобновление повтором Create/Approve и runbook | open |
 | KI-payout-11 | `provider` выплаты не заполняется: CF-2 `GatewayPayoutEvent` не несет провайдера, `submitted` фиксирует только `gateway_payout_id`/`txid` | `payouts.provider` и поле provider в `payout.events` пусты (влияет на Reconciler 9.x/отчетность) | заполнение в 10.4 (перепроверка статуса/маршрут) или расширение CF-2 владельцем контракта | open |
@@ -129,7 +136,8 @@ consumer lag; дашборды после задачи 0.7.
 | :-- | :-- | :-- | :-- | :-- |
 | CBL-10.1 | 2026-10-15 | done, ревью закрыто (схема payouts/payout_transitions, автомат с двойным барьером и CAS, `reserve_id`, e2e обе цепочки, покрытие 91.6%) | `.specs/CBL-10.1-payout-schema.md` | fcd3b8a |
 | CBL-10.5 | 2026-10-15 | done, ревью закрыто (политика порогов апрува с fail-safe, журнал голосов append-only, два разных оператора и вето, gRPC ApprovePayout, e2e grpcurl, покрытие 90.5%) | `.specs/CBL-10.5-approvals.md` | 8a6e49a |
-| CBL-10.2 | 2026-10-15 | done, ревью закрыто (сага: резерв Ledger из golden-векторов, payout.commands через outbox, consumer gateway.payout.events с привязкой вердикта, commit/release, компенсация, continuation апрува, e2e Kafka) | `.specs/CBL-10.2-saga.md` | этот коммит |
+| CBL-10.2 | 2026-10-15 | done, ревью закрыто (сага: резерв Ledger из golden-векторов, payout.commands через outbox, consumer gateway.payout.events с привязкой вердикта, commit/release, компенсация, continuation апрува, e2e Kafka) | `.specs/CBL-10.2-saga.md` | d5788fc |
+| CBL-10.6 | 2026-10-15 | done, ревью закрыто (возвраты: refund_invoice_id в контрактах cf-2.1 и payout.events, CHECK/индекс/неизменяемость, канонизация и хэш, e2e возврата) | `.specs/CBL-10.6-refunds.md` | этот коммит |
 
 ## 11. Runbook
 
@@ -189,3 +197,16 @@ consumer lag; дашборды после задачи 0.7.
    `gateway_payout_id`/`txid` с Connector; при подтвержденной подделке - разбор
    инцидента (доступ к топику/gRPC), денежные исправления - только сторно
    (10.x); prod запрещен до ACL/mTLS (0.5/0.6).
+
+Возвраты (10.6):
+
+1. Поиск возвратов: `SELECT id, state, refund_invoice_id, merchant_ref FROM
+   payouts WHERE refund_invoice_id = '<invoice_id>' ORDER BY created_at`
+   (частичный индекс `payouts_refund_idx`); агрегация частичных возвратов и
+   остаток счета - Billing API 7.x.
+2. Возврат на неизвестный/чужой счет (KI-payout-02): сверить
+   `refund_invoice_id` с Billing API и записями платежей; события `refund.*`
+   мерчанту могли быть отправлены - уведомить 8.x/7.x; денежные исправления -
+   только сторно после разбора.
+3. Маркер возврата неизменяем; ошибка «immutable fields cannot change» при
+   правке - ожидаемая (прямой SQL запрещен).

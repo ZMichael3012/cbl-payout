@@ -60,6 +60,7 @@ func (s *PayoutServer) CreatePayout(ctx context.Context, req *payoutv1.CreatePay
 		Network:            req.GetNetwork(),
 		DestinationAddress: req.GetDestinationAddress(),
 		MerchantRef:        req.GetMerchantRef(),
+		RefundInvoiceID:    req.GetRefundInvoiceId(),
 	})
 	if err != nil {
 		return nil, payoutStatusError(err)
@@ -141,6 +142,9 @@ func payoutToProto(payout storage.Payout) *payoutv1.Payout {
 	}
 	if payout.FailureReason != nil {
 		message.FailureReason = *payout.FailureReason
+	}
+	if payout.RefundInvoiceID != nil {
+		message.RefundInvoiceId = *payout.RefundInvoiceID
 	}
 	if payout.FeeMinor != nil && payout.FeeAsset != nil && payout.FeeDecimals != nil {
 		message.Fee = &commonv1.Money{

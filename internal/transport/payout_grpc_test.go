@@ -39,14 +39,16 @@ func (f *fakeDecider) Approve(_ context.Context, payoutID, operatorID string, ap
 	return f.payout, f.err
 }
 
-// fakeSaga подменяет операции саги.
+// fakeSaga подменяет операции саги и фиксирует вход создания.
 type fakeSaga struct {
-	payout storage.Payout
-	err    error
+	payout   storage.Payout
+	err      error
+	gotInput *usecase.CreatePayoutInput
 }
 
 // Create возвращает заданный результат.
-func (f *fakeSaga) Create(context.Context, usecase.CreatePayoutInput) (storage.Payout, error) {
+func (f *fakeSaga) Create(_ context.Context, in usecase.CreatePayoutInput) (storage.Payout, error) {
+	f.gotInput = &in
 	return f.payout, f.err
 }
 
@@ -165,7 +167,13 @@ func TestCreatePayoutValidationAndErrors(t *testing.T) {
 func TestCreatePayoutSuccessMapping(t *testing.T) {
 	t.Parallel()
 
-	saga := &fakeSaga{payout: storage.Payout{ID: "p-1", State: string(domain.StateSentToGateway), StateVersion: 4}}
+	refundInvoice := "01a13d53-6bf5-707f-a944-c0d7358654f0"
+	saga := &fakeSaga{payout: storage.Payout{
+		ID:              "p-1",
+		State:           string(domain.StateSentToGateway),
+		StateVersion:    4,
+		RefundInvoiceID: &refundInvoice,
+	}}
 	server := transport.NewPayoutServer(&fakeDecider{}, saga)
 
 	response, err := server.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
@@ -174,8 +182,16 @@ func TestCreatePayoutSuccessMapping(t *testing.T) {
 		Amount:             &commonv1.Money{MinorUnits: 500_000, Asset: "USDT", Decimals: 2},
 		Network:            "trc20",
 		DestinationAddress: "Taddr",
+		RefundInvoiceId:    refundInvoice,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "p-1", response.GetPayoutId())
 	assert.Equal(t, payoutv1.PayoutState_PAYOUT_STATE_SENT_TO_GATEWAY, response.GetState())
+	require.NotNil(t, saga.gotInput)
+	assert.Equal(t, refundInvoice, saga.gotInput.RefundInvoiceID, "маркер возврата пробрасывается во вход саги")
+
+	// GetPayout отдает маркер возврата (CBL-10.6).
+	getResponse, err := server.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
+	require.NoError(t, err)
+	assert.Equal(t, refundInvoice, getResponse.GetPayout().GetRefundInvoiceId())
 }

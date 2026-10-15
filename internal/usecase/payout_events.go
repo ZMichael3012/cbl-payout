@@ -80,15 +80,16 @@ func BuildPayoutEventEnvelope(event storage.TransitionEvent) (outbox.Envelope, b
 		return outbox.Envelope{}, false, fmt.Errorf("usecase: transition %s has zero occurred_at", event.To)
 	}
 	payload := &eventsv1.PayoutEvent{
-		PayoutId:      event.Payout.ID,
-		MerchantId:    event.Payout.MerchantID,
-		Type:          eventType,
-		Amount:        &commonv1.Money{MinorUnits: event.Payout.AmountMinor, Asset: event.Payout.AmountAsset, Decimals: decimalsToUint32(event.Payout.AmountDecimals)},
-		Txid:          derefString(event.Payout.TxID),
-		Provider:      derefString(event.Payout.Provider),
-		FailureReason: derefString(event.Payout.FailureReason),
-		StateVersion:  uint64(event.Payout.StateVersion), //nolint:gosec // CHECK >= 1
-		OccurredAt:    timestamppb.New(event.OccurredAt.UTC()),
+		PayoutId:        event.Payout.ID,
+		MerchantId:      event.Payout.MerchantID,
+		Type:            eventType,
+		Amount:          &commonv1.Money{MinorUnits: event.Payout.AmountMinor, Asset: event.Payout.AmountAsset, Decimals: decimalsToUint32(event.Payout.AmountDecimals)},
+		Txid:            derefString(event.Payout.TxID),
+		Provider:        derefString(event.Payout.Provider),
+		FailureReason:   derefString(event.Payout.FailureReason),
+		StateVersion:    uint64(event.Payout.StateVersion), //nolint:gosec // CHECK >= 1
+		OccurredAt:      timestamppb.New(event.OccurredAt.UTC()),
+		RefundInvoiceId: derefString(event.Payout.RefundInvoiceID),
 	}
 	if fee := moneyFrom(event.Payout.FeeMinor, event.Payout.FeeAsset, event.Payout.FeeDecimals); fee != nil {
 		payload.Fee = fee

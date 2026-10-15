@@ -1,6 +1,6 @@
 # E2E CBL-10.5: двухэтапное подтверждение выплат через gRPC на compose-стенде.
 # Запуск из каталога сервиса: powershell -NoProfile -File test/e2e/approval.ps1
-# Сценарий: compose up -> миграции (версия 4) -> grpcurl ApprovePayout:
+# Сценарий: compose up -> миграции (версия 5) -> grpcurl ApprovePayout:
 # крупная выплата проходит два голоса разных операторов (requested -> approved),
 # отклонение второго оператора дает rejected, малая выплата ниже порога
 # отклоняется FailedPrecondition, журнал голосов append-only.
@@ -73,7 +73,7 @@ try {
     foreach ($attempt in 1..30) {
         try {
             $version = Invoke-Psql "SELECT max(version_id) FROM goose_db_version"
-            if ($version -eq "4") { $migrated = $true; break }
+            if ([int]$version -ge 5) { $migrated = $true; break }
         } catch {
             # сервер еще поднимается
         }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -220,6 +221,76 @@ func TestIntegrationSagaLargeWaitsApproval(t *testing.T) {
 	advanced, err := service2.Advance(ctx, payout.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(domain.StateSentToGateway), advanced.State)
+}
+
+func TestIntegrationSagaRefundFlow(t *testing.T) {
+	db, repo := setupSagaDB(t)
+	service, consumer, ledger := sagaServiceAt(t, repo, `{"default":0}`)
+	ctx := context.Background()
+
+	refundInvoice := mustUUIDv7(t)
+	in := smallPayoutInput()
+	in.IdempotencyKey = "refund-1"
+	in.RefundInvoiceID = refundInvoice
+	payout, err := service.Create(ctx, in)
+	require.NoError(t, err)
+	require.Equal(t, string(domain.StateSentToGateway), payout.State)
+	require.NotNil(t, payout.RefundInvoiceID)
+	assert.Equal(t, refundInvoice, *payout.RefundInvoiceID)
+
+	// Событие создания несет маркер возврата для Notification (refund.*).
+	events := outboxRows(t, db, usecase.TopicPayoutEvents)
+	require.Len(t, events, 1)
+	var created eventsv1.PayoutEvent
+	require.NoError(t, proto.Unmarshal(events[0].Payload, &created))
+	assert.Equal(t, refundInvoice, created.GetRefundInvoiceId())
+	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_REQUESTED, created.GetType())
+
+	// Сага возврата: submitted + confirmed -> commit + completed с маркером.
+	require.NoError(t, consumer.Handle(ctx, nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
+		PayoutId:        payout.ID,
+		GatewayPayoutId: "gw-refund",
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED,
+	})))
+	require.NoError(t, consumer.Handle(ctx, nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
+		PayoutId:        payout.ID,
+		GatewayPayoutId: "gw-refund",
+		Txid:            "tx-refund",
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
+	})))
+
+	completed, _, err := repo.Get(ctx, payout.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(domain.StateCompleted), completed.State)
+	assert.Equal(t, []string{"reserve-" + payout.ID}, ledger.commits)
+
+	events = outboxRows(t, db, usecase.TopicPayoutEvents)
+	require.Len(t, events, 2)
+	var completedEvent eventsv1.PayoutEvent
+	require.NoError(t, proto.Unmarshal(events[1].Payload, &completedEvent))
+	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED, completedEvent.GetType())
+	assert.Equal(t, refundInvoice, completedEvent.GetRefundInvoiceId())
+
+	// Маркер возврата неизменяем (второй барьер).
+	res := db.Exec("UPDATE payouts SET refund_invoice_id = NULL, state_version = state_version + 1 WHERE id = ?", payout.ID)
+	require.Error(t, res.Error)
+	assert.Contains(t, res.Error.Error(), "immutable")
+
+	// CHECK-формат на прямом INSERT.
+	rawID := mustUUIDv7(t)
+	badRefund := db.Exec(`INSERT INTO payouts (id, merchant_id, idempotency_key, request_hash, state, amount_minor,
+		amount_asset, amount_decimals, network, destination_address, refund_invoice_id)
+		VALUES (?, 'm-1', 'bad-refund', 'hash', 'requested', 100, 'USDT', 2, 'trc20', 'Taddr', 'not-a-uuid')`, rawID)
+	require.Error(t, badRefund.Error, "невалидный refund_invoice_id отклоняется CHECK-ом")
+	assert.Contains(t, badRefund.Error.Error(), "refund_invoice_id")
+}
+
+// mustUUIDv7 возвращает строку нового UUIDv7.
+func mustUUIDv7(t *testing.T) string {
+	t.Helper()
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+	return id.String()
 }
 
 // mustPolicy собирает политику или падает.

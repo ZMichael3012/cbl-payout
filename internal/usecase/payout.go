@@ -119,6 +119,9 @@ type CreatePayoutInput struct {
 	DestinationAddress string
 	// MerchantRef задает ссылку мерчанта для корреляции.
 	MerchantRef string
+	// RefundInvoiceID задает исходный счет возврата: непустое значение
+	// создает возврат тем же путем саги (CBL-10.6).
+	RefundInvoiceID string
 }
 
 // PayoutService ведет сагу выплаты: создание, резерв в Ledger, команда
@@ -173,6 +176,11 @@ func (s *PayoutService) Create(ctx context.Context, in CreatePayoutInput) (stora
 	in.Network = strings.TrimSpace(in.Network)
 	in.DestinationAddress = strings.TrimSpace(in.DestinationAddress)
 	in.MerchantRef = strings.TrimSpace(in.MerchantRef)
+	refundInvoiceID, refundErr := canonicalRefundID(in.RefundInvoiceID)
+	if refundErr != nil {
+		return storage.Payout{}, refundErr
+	}
+	in.RefundInvoiceID = refundInvoiceID
 	if err := validateCreatePayout(in); err != nil {
 		return storage.Payout{}, err
 	}
@@ -194,6 +202,10 @@ func (s *PayoutService) Create(ctx context.Context, in CreatePayoutInput) (stora
 		DestinationAddress: in.DestinationAddress,
 		MerchantRef:        in.MerchantRef,
 	}
+	if in.RefundInvoiceID != "" {
+		refund := in.RefundInvoiceID
+		payout.RefundInvoiceID = &refund
+	}
 	createErr := s.store.Create(ctx, payout)
 	switch {
 	case errors.Is(createErr, storage.ErrDuplicateKey):
@@ -204,6 +216,11 @@ func (s *PayoutService) Create(ctx context.Context, in CreatePayoutInput) (stora
 	created, err := s.store.Payout(ctx, payout.ID)
 	if err != nil {
 		return storage.Payout{}, err
+	}
+	if created.RefundInvoiceID != nil {
+		s.log.Info("refund created",
+			zap.String("payout_id", created.ID),
+			zap.String("refund_invoice_id", *created.RefundInvoiceID))
 	}
 	if s.policy.RequiredApprovals(created.AmountAsset, created.AmountMinor) > 0 {
 		s.log.Info("payout awaits operator approval", zap.String("payout_id", created.ID))
@@ -350,9 +367,14 @@ func (s *PayoutService) advance(ctx context.Context, payout storage.Payout) (sto
 			return storage.Payout{}, fmt.Errorf("usecase: advance payout %s: %w", payout.ID, err)
 		}
 		if result.StateVersion > payout.StateVersion {
-			s.log.Info("payout sent to gateway",
+			fields := []zap.Field{
 				zap.String("payout_id", payout.ID),
-				zap.Int64("state_version", result.StateVersion))
+				zap.Int64("state_version", result.StateVersion),
+			}
+			if payout.RefundInvoiceID != nil {
+				fields = append(fields, zap.String("refund_invoice_id", *payout.RefundInvoiceID))
+			}
+			s.log.Info("payout sent to gateway", fields...)
 		}
 		return result, nil
 	}
@@ -456,6 +478,9 @@ func validateCreatePayout(in CreatePayoutInput) error {
 // createRequestHash считает стабильный хэш тела создания для идемпотентной
 // сверки повторов ключа. Поля кодируются с длиной (length-prefix): склейка
 // через разделитель допускала бы коллизии строк с этим разделителем внутри.
+// Маркер возврата входит в хэш только при непустом значении: хэши обычных
+// выплат, созданных до 10.6, обязаны совпадать (идемпотентный повтор после
+// апгрейда не должен давать ложный конфликт).
 func createRequestHash(in CreatePayoutInput) string {
 	var builder strings.Builder
 	writeLengthPrefixed := func(value string) {
@@ -468,8 +493,29 @@ func createRequestHash(in CreatePayoutInput) string {
 	writeLengthPrefixed(in.Network)
 	writeLengthPrefixed(in.DestinationAddress)
 	writeLengthPrefixed(in.MerchantRef)
+	if in.RefundInvoiceID != "" {
+		writeLengthPrefixed(in.RefundInvoiceID)
+	}
 	sum := sha256.Sum256([]byte(builder.String()))
 	return hex.EncodeToString(sum[:])
+}
+
+// canonicalRefundID проверяет и канонизирует исходный счет возврата:
+// пустое значение - обычная выплата, непустое обязано быть UUID
+// (нулевой UUID и строки из одних пробелов отклоняются).
+func canonicalRefundID(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: refund_invoice_id", ErrInvalidPayoutInput)
+	}
+	parsed, err := uuid.Parse(trimmed)
+	if err != nil || parsed == uuid.Nil {
+		return "", fmt.Errorf("%w: refund_invoice_id", ErrInvalidPayoutInput)
+	}
+	return parsed.String(), nil
 }
 
 // hasControlRunes сообщает о наличии управляющих символов в строке.
