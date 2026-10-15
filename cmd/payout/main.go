@@ -22,7 +22,14 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	payoutv1 "github.com/cbl/cbl-protos/gen/go/billing/payout/v1"
+
 	"github.com/cbl/cbl-kit/storagex"
+
+	"github.com/cbl/cbl-payout/internal/domain"
+	"github.com/cbl/cbl-payout/internal/storage"
+	"github.com/cbl/cbl-payout/internal/transport"
+	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
 // main поднимает gRPC-сервер сервиса, административный HTTP-сервер и сервер метрик.
@@ -35,21 +42,18 @@ func main() {
 
 	dsn := os.Getenv("PG_DSN")
 	if dsn == "" {
-		log.Error("PG_DSN is required")
-		return
+		fatal(log, "PG_DSN is required")
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Error("connect postgres failed", zap.Error(err))
-		return
+		fatal(log, "connect postgres failed", zap.Error(err))
 	}
 
 	// Пул ограничен по образцу леджера (T-LED-04): gRPC и фоновая сага (10.2)
 	// делят соединения, опечатка в env не должна исчерпать max_connections.
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Error("resolve sql db failed", zap.Error(err))
-		return
+		fatal(log, "resolve sql db failed", zap.Error(err))
 	}
 	maxOpen := min(getenvInt("DB_MAX_OPEN_CONNS", 20), 100)
 	maxIdle := min(getenvInt("DB_MAX_IDLE_CONNS", 10), maxOpen)
@@ -67,9 +71,16 @@ func main() {
 
 	migrationsDir := getenv("MIGRATIONS_DIR", "./migrations")
 	if err := storagex.Migrate(ctx, db, migrationsDir); err != nil {
-		log.Error("apply migrations failed", zap.String("dir", migrationsDir), zap.Error(err))
-		return
+		fatal(log, "apply migrations failed", zap.String("dir", migrationsDir), zap.Error(err))
 	}
+
+	repo := storage.NewRepository(db)
+	policy, policyErr := domain.ParseApprovalPolicy(os.Getenv("PAYOUT_APPROVAL_POLICY"))
+	if policyErr != nil {
+		fatal(log, "parse PAYOUT_APPROVAL_POLICY failed", zap.Error(policyErr))
+	}
+	log.Info("payout approval policy configured", zap.String("policy", policy.Describe()))
+	approval := usecase.NewApprovalService(repo, log, usecase.WithApprovalPolicy(policy))
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -87,12 +98,12 @@ func main() {
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcSrv, healthSrv)
+	payoutv1.RegisterPayoutServiceServer(grpcSrv, transport.NewPayoutServer(approval))
 	reflection.Register(grpcSrv)
 
 	grpcListener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
-		log.Error("grpc listen failed", zap.String("addr", grpcAddr), zap.Error(err))
-		return
+		fatal(log, "grpc listen failed", zap.String("addr", grpcAddr), zap.Error(err))
 	}
 
 	go func() {
@@ -139,6 +150,13 @@ func metricsHandler() http.Handler {
 		_, _ = fmt.Fprintln(w, "# metrics endpoint placeholder (task 0.7)")
 	})
 	return mux
+}
+
+// fatal логирует фатальную ошибку старта и завершает процесс с ненулевым
+// кодом: оркестратор должен видеть неуспех, а не «успешный» выход.
+func fatal(log *zap.Logger, message string, fields ...zap.Field) {
+	log.Error(message, fields...)
+	os.Exit(1)
 }
 
 // getenv возвращает значение переменной окружения или значение по умолчанию.

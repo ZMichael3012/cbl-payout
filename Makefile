@@ -11,6 +11,7 @@ test-integration:
 
 e2e:
 	powershell -NoProfile -File test/e2e/schema.ps1
+	powershell -NoProfile -File test/e2e/approval.ps1
 
 vet:
 	go vet ./...

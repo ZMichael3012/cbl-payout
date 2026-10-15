@@ -1,6 +1,6 @@
 # E2E CBL-10.1: схема выплаты и автомат состояний на compose-стенде payout.
 # Запуск из каталога сервиса: powershell -NoProfile -File test/e2e/schema.ps1
-# Сценарий: compose up -> миграции (версия 3) -> основная цепочка
+# Сценарий: compose up -> миграции (версия 4) -> основная цепочка
 # requested -> reserved -> sent_to_gateway -> completed и компенсационная
 # requested -> approved -> reserved -> failed -> compensated,
 # запрещенные переходы и append-only журнал отклоняются вторым барьером БД.
@@ -28,19 +28,33 @@ function Assert-PsqlFails([string]$Sql, [string]$What, [string]$ExpectedText) {
     if (($output -join "`n") -notmatch $ExpectedText) { throw "$What rejected with unexpected error: $($output -join "`n")" }
 }
 
+# Invoke-Compose выполняет docker compose, не превращая его stderr (прогресс,
+# остановка контейнеров) в terminating error при EAP=Stop.
+function Invoke-Compose([string[]]$ComposeArgs) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        docker compose -f $ComposeFile @ComposeArgs | Out-Null
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return $code
+}
+
 Push-Location $RepoRoot
 try {
     # Чистый стенд: остатки прошлого запуска приводят к конфликту имен.
-    docker compose -f $ComposeFile --profile app down -v 2>$null | Out-Null
-    docker compose -f $ComposeFile --profile app up -d --build
-    if ($LASTEXITCODE -ne 0) { throw "docker compose up failed" }
+    Invoke-Compose @("--profile", "app", "down", "-v") | Out-Null
+    $upCode = Invoke-Compose @("--profile", "app", "up", "-d", "--build")
+    if ($upCode -ne 0) { throw "docker compose up failed" }
 
     $migrated = $false
     $version = "unknown"
     foreach ($attempt in 1..30) {
         try {
             $version = Invoke-Psql "SELECT max(version_id) FROM goose_db_version"
-            if ($version -eq "3") { $migrated = $true; break }
+            if ($version -eq "4") { $migrated = $true; break }
         } catch {
             Start-Sleep -Seconds 2
         }
@@ -94,6 +108,6 @@ try {
 
     Write-Host "OK: migrations=$version, chain=completed:4, compensation=compensated:5, forbidden transition and rewrite rejected"
 } finally {
-    docker compose -f $ComposeFile --profile app down -v | Out-Null
+    Invoke-Compose @("--profile", "app", "down", "-v") | Out-Null
     Pop-Location
 }
