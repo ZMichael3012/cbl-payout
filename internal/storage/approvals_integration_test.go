@@ -78,3 +78,33 @@ func TestIntegrationApprovalOperatorConstraints(t *testing.T) {
 		VALUES (?, 'op-2', true, 0)`, payout.ID)
 	require.Error(t, zeroRequired.Error, "required=0 is invalid: a vote without a requirement is not written")
 }
+
+// TestIntegrationListApprovals checks the vote order exposed to the admin
+// contour (CBL-12.2, Payout.approved_by).
+func TestIntegrationListApprovals(t *testing.T) {
+	db := setupPayoutDB(t)
+	repo := storage.NewRepository(db)
+	ctx := context.Background()
+
+	payout := newPayout(t, "approval-list-1")
+	require.NoError(t, repo.Create(ctx, payout))
+
+	empty, err := repo.ListApprovals(ctx, payout.ID)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	for _, operator := range []string{"op-1", "op-2"} {
+		ok, recordErr := repo.RecordApproval(ctx, nil, storage.Approval{
+			PayoutID:   payout.ID,
+			OperatorID: operator,
+			Approve:    true,
+			Required:   2,
+		})
+		require.NoError(t, recordErr)
+		assert.True(t, ok)
+	}
+
+	operators, err := repo.ListApprovals(ctx, payout.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"op-1", "op-2"}, operators, "votes come in journal order")
+}

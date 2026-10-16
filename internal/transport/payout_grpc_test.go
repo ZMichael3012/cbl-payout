@@ -22,12 +22,14 @@ import (
 
 // fakeDecider substitutes the approval service and records the arguments.
 type fakeDecider struct {
-	payout    storage.Payout
-	err       error
-	gotID     string
-	gotOp     string
-	gotApprov bool
-	gotReason string
+	payout       storage.Payout
+	err          error
+	approvals    []string
+	approvalsErr error
+	gotID        string
+	gotOp        string
+	gotApprov    bool
+	gotReason    string
 }
 
 // Approve returns the configured result.
@@ -37,6 +39,14 @@ func (f *fakeDecider) Approve(_ context.Context, payoutID, operatorID string, ap
 	f.gotApprov = approve
 	f.gotReason = reason
 	return f.payout, f.err
+}
+
+// Approvals returns the configured vote list (CBL-12.2).
+func (f *fakeDecider) Approvals(context.Context, string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.approvals, f.approvalsErr
 }
 
 // fakeSaga substitutes the saga operations and records the creation input.
@@ -81,7 +91,7 @@ func TestApprovePayoutSuccessMapping(t *testing.T) {
 		FeeAsset:           &feeAsset,
 		FeeDecimals:        &feeDecimals,
 		CreatedAt:          time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC),
-	}}
+	}, approvals: []string{"op-1"}}
 	server := transport.NewPayoutServer(decider, &fakeSaga{})
 
 	response, err := server.ApprovePayout(context.Background(), &payoutv1.ApprovePayoutRequest{
@@ -105,6 +115,7 @@ func TestApprovePayoutSuccessMapping(t *testing.T) {
 	assert.Equal(t, "tx-1", payout.GetTxid())
 	assert.Equal(t, int64(50), payout.GetFee().GetMinorUnits())
 	assert.Equal(t, "", payout.GetFailureReason())
+	assert.Equal(t, []string{"op-1"}, payout.GetApprovedBy(), "the approval progress is exposed (cf-3.9)")
 	assert.Equal(t, "2026-10-15T12:00:00Z", payout.GetCreatedAt().AsTime().UTC().Format(time.RFC3339))
 }
 
@@ -190,8 +201,9 @@ func TestCreatePayoutSuccessMapping(t *testing.T) {
 	require.NotNil(t, saga.gotInput)
 	assert.Equal(t, refundInvoice, saga.gotInput.RefundInvoiceID, "the refund marker is passed through to the saga input")
 
-	// GetPayout returns the refund marker (CBL-10.6).
+	// GetPayout returns the refund marker (CBL-10.6) and the approval progress.
 	getResponse, err := server.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
 	require.NoError(t, err)
 	assert.Equal(t, refundInvoice, getResponse.GetPayout().GetRefundInvoiceId())
+	assert.Empty(t, getResponse.GetPayout().GetApprovedBy(), "no votes yet")
 }

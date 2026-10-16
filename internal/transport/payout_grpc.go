@@ -21,6 +21,8 @@ import (
 type ApprovalDecider interface {
 	// Approve records an operator vote for a payout.
 	Approve(ctx context.Context, payoutID, operatorID string, approve bool, reason string) (storage.Payout, error)
+	// Approvals returns the operators that voted, in vote order.
+	Approvals(ctx context.Context, payoutID string) ([]string, error)
 }
 
 // PayoutSaga describes the saga operations needed by the gRPC transport (10.2).
@@ -69,13 +71,17 @@ func (s *PayoutServer) CreatePayout(ctx context.Context, req *payoutv1.CreatePay
 	return &payoutv1.CreatePayoutResponse{PayoutId: payout.ID, State: payoutState(payout.State)}, nil
 }
 
-// GetPayout returns a payout by identifier.
+// GetPayout returns a payout by identifier with the approval progress.
 func (s *PayoutServer) GetPayout(ctx context.Context, req *payoutv1.GetPayoutRequest) (*payoutv1.GetPayoutResponse, error) {
 	payout, err := s.saga.Get(ctx, req.GetPayoutId())
 	if err != nil {
 		return nil, payoutStatusError(err)
 	}
-	return &payoutv1.GetPayoutResponse{Payout: payoutToProto(payout)}, nil
+	approvedBy, err := s.approval.Approvals(ctx, payout.ID)
+	if err != nil {
+		return nil, payoutStatusError(err)
+	}
+	return &payoutv1.GetPayoutResponse{Payout: payoutToProto(payout, approvedBy)}, nil
 }
 
 // ApprovePayout approves or rejects a payout by operator vote: once the
@@ -86,7 +92,11 @@ func (s *PayoutServer) ApprovePayout(ctx context.Context, req *payoutv1.ApproveP
 	if err != nil {
 		return nil, payoutStatusError(err)
 	}
-	return &payoutv1.ApprovePayoutResponse{Payout: payoutToProto(payout)}, nil
+	approvedBy, err := s.approval.Approvals(ctx, payout.ID)
+	if err != nil {
+		return nil, payoutStatusError(err)
+	}
+	return &payoutv1.ApprovePayoutResponse{Payout: payoutToProto(payout, approvedBy)}, nil
 }
 
 // payoutStatusError maps service errors to gRPC codes; the texts are fixed
@@ -126,8 +136,9 @@ func decimalsToInt(decimals uint32) int {
 	return int(decimals)
 }
 
-// payoutToProto converts a payout row to the CF-1 contract message.
-func payoutToProto(payout storage.Payout) *payoutv1.Payout {
+// payoutToProto converts a payout row to the CF-1 contract message with the
+// approval progress (approved_by, cf-3.9).
+func payoutToProto(payout storage.Payout, approvedBy []string) *payoutv1.Payout {
 	message := &payoutv1.Payout{
 		PayoutId:           payout.ID,
 		MerchantId:         payout.MerchantID,
@@ -137,6 +148,7 @@ func payoutToProto(payout storage.Payout) *payoutv1.Payout {
 		DestinationAddress: payout.DestinationAddress,
 		StateVersion:       uint64(payout.StateVersion), //nolint:gosec // CHECK >= 1
 		CreatedAt:          timestamppb.New(payout.CreatedAt.UTC()),
+		ApprovedBy:         approvedBy,
 	}
 	if payout.TxID != nil {
 		message.Txid = *payout.TxID

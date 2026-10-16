@@ -3,6 +3,7 @@ package usecase_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -87,6 +88,16 @@ func (f *fakeApprovalStore) ApprovalByOperator(_ context.Context, _ *gorm.DB, _,
 // ApprovalCount returns the number of votes.
 func (f *fakeApprovalStore) ApprovalCount(context.Context, *gorm.DB, string) (int, error) {
 	return len(f.votes), nil
+}
+
+// ListApprovals returns the voting operators in a fixed order (CBL-12.2).
+func (f *fakeApprovalStore) ListApprovals(context.Context, string) ([]string, error) {
+	operators := make([]string, 0, len(f.votes))
+	for operator := range f.votes {
+		operators = append(operators, operator)
+	}
+	sort.Strings(operators)
+	return operators, nil
 }
 
 // TransitionTx performs a CAS transition on the fake payout.
@@ -384,6 +395,11 @@ func (f failingApprovalStore) ApprovalByOperator(context.Context, *gorm.DB, stri
 // ApprovalCount is not called.
 func (f failingApprovalStore) ApprovalCount(context.Context, *gorm.DB, string) (int, error) {
 	return 0, f.err
+}
+
+// ListApprovals is not called.
+func (f failingApprovalStore) ListApprovals(context.Context, string) ([]string, error) {
+	return nil, f.err
 }
 
 // TransitionTx is not called.

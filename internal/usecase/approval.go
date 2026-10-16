@@ -55,6 +55,8 @@ type ApprovalStore interface {
 	ApprovalByOperator(ctx context.Context, tx *gorm.DB, payoutID, operatorID string) (storage.Approval, bool, error)
 	// ApprovalCount returns the number of votes for the payout.
 	ApprovalCount(ctx context.Context, tx *gorm.DB, payoutID string) (int, error)
+	// ListApprovals returns the operators that voted, in vote order.
+	ListApprovals(ctx context.Context, payoutID string) ([]string, error)
 	// TransitionTx performs a state transition in the given transaction.
 	TransitionTx(ctx context.Context, tx *gorm.DB, id string, expectedVersion uint64, to domain.State, patch storage.TransitionPatch) (storage.Payout, error)
 }
@@ -71,6 +73,16 @@ type ApprovalService struct {
 
 // ApprovalOption configures ApprovalService.
 type ApprovalOption func(*ApprovalService)
+
+// Approvals returns the operators that voted on the payout, in vote order
+// (the administrative read contour of CBL-12.2).
+func (s *ApprovalService) Approvals(ctx context.Context, payoutID string) ([]string, error) {
+	operators, err := s.store.ListApprovals(ctx, payoutID)
+	if err != nil {
+		return nil, fmt.Errorf("approval service: list approvals: %w", err)
+	}
+	return operators, nil
+}
 
 // WithApprovalPolicy sets the approval threshold policy.
 func WithApprovalPolicy(policy domain.ApprovalPolicy) ApprovalOption {
