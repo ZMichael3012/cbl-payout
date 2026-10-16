@@ -103,8 +103,18 @@ func TestIntegrationListApprovals(t *testing.T) {
 		require.NoError(t, recordErr)
 		assert.True(t, ok)
 	}
+	// A rejecting vote is not an approval and must stay out of approved_by.
+	ok, err := repo.RecordApproval(ctx, nil, storage.Approval{
+		PayoutID:   payout.ID,
+		OperatorID: "op-veto",
+		Approve:    false,
+		Reason:     "sanctions",
+		Required:   2,
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
 
 	operators, err := repo.ListApprovals(ctx, payout.ID)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"op-1", "op-2"}, operators, "votes come in journal order")
+	assert.Equal(t, []string{"op-1", "op-2"}, operators, "only approvals, in journal order")
 }

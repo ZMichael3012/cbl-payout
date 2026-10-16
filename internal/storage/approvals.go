@@ -118,13 +118,14 @@ func (r *Repository) ApprovalCount(ctx context.Context, tx *gorm.DB, payoutID st
 	return int(count), nil
 }
 
-// ListApprovals returns the operators that voted on the payout, in vote order:
-// the administrative read contour shows the approval progress (CBL-12.2,
-// additive Payout.approved_by).
+// ListApprovals returns the operators whose approval votes were recorded, in
+// vote order: the administrative read contour shows the approval progress
+// (CBL-12.2, additive Payout.approved_by); a rejecting vote is not an approval
+// and stays out of the list.
 func (r *Repository) ListApprovals(ctx context.Context, payoutID string) ([]string, error) {
 	var operators []string
 	err := r.db.WithContext(ctx).Model(&Approval{}).
-		Where("payout_id = ?", payoutID).
+		Where("payout_id = ? AND approve = ?", payoutID, true).
 		Order("created_at ASC, id ASC").
 		Pluck("operator_id", &operators).Error
 	if err != nil {
