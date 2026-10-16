@@ -62,8 +62,8 @@ CREATE FUNCTION payouts_transition_guard() RETURNS trigger AS $$
 DECLARE
     allowed boolean;
 BEGIN
-    -- Реквизиты получателя и суммы неизменяемы: подмена адреса/сети после
-    -- создания увела бы деньги, поэтому второй барьер закрыт до апрува и отправки.
+    -- Recipient details and amounts are immutable: substituting the address or
+    -- network after creation would divert the money, so the second barrier is closed before approval and sending.
     IF NEW.id IS DISTINCT FROM OLD.id
         OR NEW.merchant_id IS DISTINCT FROM OLD.merchant_id
         OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
@@ -77,7 +77,7 @@ BEGIN
         OR NEW.merchant_ref IS DISTINCT FROM OLD.merchant_ref THEN
         RAISE EXCEPTION 'payouts: immutable fields cannot change';
     END IF;
-    -- Идентификатор удержания Ledger фиксируется при резерве и не меняется.
+    -- The Ledger hold identifier is fixed at reserve time and does not change.
     IF OLD.reserve_id IS NOT NULL AND NEW.reserve_id IS DISTINCT FROM OLD.reserve_id THEN
         RAISE EXCEPTION 'payouts: reserve_id is immutable once set';
     END IF;
@@ -85,8 +85,8 @@ BEGIN
         RAISE EXCEPTION 'payouts: state_version must increment by 1 (got % -> %)',
             OLD.state_version, NEW.state_version;
     END IF;
-    -- Самопереход (обновление данных саги) допустим только в нетерминальных
-    -- состояниях; терминальные неизменяемы.
+    -- A self-transition (saga data update) is allowed only in non-terminal
+    -- states; terminal states are immutable.
     IF NEW.state = OLD.state THEN
         IF OLD.state IN ('completed', 'compensated', 'rejected') THEN
             RAISE EXCEPTION 'payouts: terminal state % is immutable', OLD.state;
@@ -119,8 +119,8 @@ BEGIN
     IF NEW.state <> 'requested' OR NEW.state_version <> 1 THEN
         RAISE EXCEPTION 'payouts: new payout must start in requested with state_version 1';
     END IF;
-    -- Данные саги появляются только переходами: тихая подмена контекста
-    -- (готовый gateway_payout_id или reserve_id при создании) запрещена.
+    -- Saga data appears only through transitions: silent substitution of the
+    -- context (a ready gateway_payout_id or reserve_id on creation) is forbidden.
     IF NEW.reserve_id IS NOT NULL OR NEW.gateway_payout_id IS NOT NULL
         OR NEW.provider IS NOT NULL OR NEW.txid IS NOT NULL
         OR NEW.failure_reason IS NOT NULL OR NEW.completed_at IS NOT NULL

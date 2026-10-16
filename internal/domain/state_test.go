@@ -12,7 +12,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/domain"
 )
 
-// allStates задает канонические состояния автомата выплаты.
+// allStates defines the canonical payout state machine states.
 var allStates = []domain.State{
 	domain.StateRequested,
 	domain.StateApproved,
@@ -24,7 +24,7 @@ var allStates = []domain.State{
 	domain.StateRejected,
 }
 
-// allowedPairs задает матрицу переходов (FR-3) в виде пар "from>to".
+// allowedPairs defines the transition matrix (FR-3) as "from>to" pairs.
 var allowedPairs = map[string]struct{}{
 	"requested>approved":        {},
 	"requested>reserved":        {},
@@ -45,7 +45,7 @@ func TestParseState(t *testing.T) {
 
 	for _, state := range allStates {
 		parsed, err := domain.ParseState(string(state))
-		require.NoErrorf(t, err, "состояние %s", state)
+		require.NoErrorf(t, err, "state %s", state)
 		assert.Equal(t, state, parsed)
 	}
 	_, err := domain.ParseState("unknown")
@@ -61,7 +61,7 @@ func TestTransitionMatrix(t *testing.T) {
 		for _, to := range allStates {
 			_, want := allowedPairs[string(from)+">"+string(to)]
 			assert.Equalf(t, want, domain.AllowedTransition(from, to),
-				"переход %s -> %s", from, to)
+				"transition %s -> %s", from, to)
 		}
 	}
 }
@@ -71,14 +71,14 @@ func TestTerminal(t *testing.T) {
 
 	terminal := []domain.State{domain.StateCompleted, domain.StateCompensated, domain.StateRejected}
 	for _, state := range terminal {
-		assert.Truef(t, domain.Terminal(state), "%s должен быть терминальным", state)
+		assert.Truef(t, domain.Terminal(state), "%s must be terminal", state)
 	}
 	active := []domain.State{
 		domain.StateRequested, domain.StateApproved, domain.StateReserved,
 		domain.StateSentToGateway, domain.StateFailed,
 	}
 	for _, state := range active {
-		assert.Falsef(t, domain.Terminal(state), "%s не терминальный", state)
+		assert.Falsef(t, domain.Terminal(state), "%s is not terminal", state)
 	}
 }
 
@@ -91,22 +91,22 @@ func TestNextVersion(t *testing.T) {
 
 	version, err = domain.NextVersion(domain.StateSentToGateway, domain.StateSentToGateway, 5)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(6), version, "самопереход увеличивает версию")
+	assert.Equal(t, uint64(6), version, "self-transition increments the version")
 
 	_, err = domain.NextVersion(domain.StateSentToGateway, domain.StateReserved, 5)
-	require.ErrorIs(t, err, domain.ErrForbiddenTransition, "переход назад запрещен")
+	require.ErrorIs(t, err, domain.ErrForbiddenTransition, "backward transition is forbidden")
 
 	_, err = domain.NextVersion(domain.StateCompensated, domain.StateCompensated, 5)
-	require.ErrorIs(t, err, domain.ErrTerminalState, "терминальное состояние неизменяемо")
+	require.ErrorIs(t, err, domain.ErrTerminalState, "terminal state is immutable")
 
 	_, err = domain.NextVersion(domain.StateRequested, domain.StateCompleted, 2)
-	require.ErrorIs(t, err, domain.ErrForbiddenTransition, "перескок через состояния запрещен")
+	require.ErrorIs(t, err, domain.ErrForbiddenTransition, "state skipping is forbidden")
 
 	_, err = domain.NextVersion(domain.StateFailed, domain.StateCompensated, 0)
 	require.ErrorIs(t, err, domain.ErrStateConflict)
 
 	_, err = domain.NextVersion("unknown", "unknown", 1)
-	require.ErrorIs(t, err, domain.ErrInvalidState, "неизвестное состояние не проходит самопереходом")
+	require.ErrorIs(t, err, domain.ErrInvalidState, "unknown state does not pass as a self-transition")
 }
 
 func TestStateMatchesProtoEnum(t *testing.T) {
@@ -122,6 +122,6 @@ func TestStateMatchesProtoEnum(t *testing.T) {
 	require.Len(t, protoStates, len(allStates))
 	for _, state := range allStates {
 		_, ok := protoStates[string(state)]
-		assert.Truef(t, ok, "состояние %s отсутствует в billing.payout.v1.PayoutState", state)
+		assert.Truef(t, ok, "state %s is missing from billing.payout.v1.PayoutState", state)
 	}
 }

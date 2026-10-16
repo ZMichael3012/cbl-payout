@@ -20,7 +20,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// fakeDecider подменяет сервис апрува и фиксирует аргументы.
+// fakeDecider substitutes the approval service and records the arguments.
 type fakeDecider struct {
 	payout    storage.Payout
 	err       error
@@ -30,7 +30,7 @@ type fakeDecider struct {
 	gotReason string
 }
 
-// Approve возвращает заданный результат.
+// Approve returns the configured result.
 func (f *fakeDecider) Approve(_ context.Context, payoutID, operatorID string, approve bool, reason string) (storage.Payout, error) {
 	f.gotID = payoutID
 	f.gotOp = operatorID
@@ -39,20 +39,20 @@ func (f *fakeDecider) Approve(_ context.Context, payoutID, operatorID string, ap
 	return f.payout, f.err
 }
 
-// fakeSaga подменяет операции саги и фиксирует вход создания.
+// fakeSaga substitutes the saga operations and records the creation input.
 type fakeSaga struct {
 	payout   storage.Payout
 	err      error
 	gotInput *usecase.CreatePayoutInput
 }
 
-// Create возвращает заданный результат.
+// Create returns the configured result.
 func (f *fakeSaga) Create(_ context.Context, in usecase.CreatePayoutInput) (storage.Payout, error) {
 	f.gotInput = &in
 	return f.payout, f.err
 }
 
-// Get возвращает заданный результат.
+// Get returns the configured result.
 func (f *fakeSaga) Get(context.Context, string) (storage.Payout, error) {
 	return f.payout, f.err
 }
@@ -91,7 +91,7 @@ func TestApprovePayoutSuccessMapping(t *testing.T) {
 		Reason:     "checked",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "p-1", decider.gotID, "аргументы пробрасываются в сервис")
+	assert.Equal(t, "p-1", decider.gotID, "the arguments are passed through to the service")
 	assert.Equal(t, "op-1", decider.gotOp)
 	assert.True(t, decider.gotApprov)
 	assert.Equal(t, "checked", decider.gotReason)
@@ -129,7 +129,7 @@ func TestApprovePayoutErrorMapping(t *testing.T) {
 		server := transport.NewPayoutServer(&fakeDecider{err: tc.err}, &fakeSaga{})
 		_, err := server.ApprovePayout(context.Background(), &payoutv1.ApprovePayoutRequest{PayoutId: "p-1", OperatorId: "op-1"})
 		require.Error(t, err)
-		assert.Equalf(t, tc.code, status.Code(err), "ошибка %v", tc.err)
+		assert.Equalf(t, tc.code, status.Code(err), "error %v", tc.err)
 	}
 }
 
@@ -138,11 +138,11 @@ func TestCreatePayoutValidationAndErrors(t *testing.T) {
 
 	server := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{})
 
-	// Без amount - InvalidArgument.
+	// Without amount it is InvalidArgument.
 	_, err := server.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{MerchantId: "m-1"})
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 
-	// Конфликт ключа идемпотентности - AlreadyExists.
+	// An idempotency key conflict is AlreadyExists.
 	conflict := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: usecase.ErrIdempotencyConflict})
 	_, err = conflict.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
 		MerchantId: "m-1",
@@ -150,7 +150,7 @@ func TestCreatePayoutValidationAndErrors(t *testing.T) {
 	})
 	assert.Equal(t, codes.AlreadyExists, status.Code(err))
 
-	// Сага недоступна - FailedPrecondition.
+	// The saga is unavailable - FailedPrecondition.
 	unavailable := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: usecase.ErrSagaUnavailable})
 	_, err = unavailable.CreatePayout(context.Background(), &payoutv1.CreatePayoutRequest{
 		MerchantId: "m-1",
@@ -158,7 +158,7 @@ func TestCreatePayoutValidationAndErrors(t *testing.T) {
 	})
 	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
 
-	// GetPayout: выплата не найдена.
+	// GetPayout: the payout is not found.
 	notFound := transport.NewPayoutServer(&fakeDecider{}, &fakeSaga{err: storage.ErrNotFound})
 	_, err = notFound.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
 	assert.Equal(t, codes.NotFound, status.Code(err))
@@ -188,9 +188,9 @@ func TestCreatePayoutSuccessMapping(t *testing.T) {
 	assert.Equal(t, "p-1", response.GetPayoutId())
 	assert.Equal(t, payoutv1.PayoutState_PAYOUT_STATE_SENT_TO_GATEWAY, response.GetState())
 	require.NotNil(t, saga.gotInput)
-	assert.Equal(t, refundInvoice, saga.gotInput.RefundInvoiceID, "маркер возврата пробрасывается во вход саги")
+	assert.Equal(t, refundInvoice, saga.gotInput.RefundInvoiceID, "the refund marker is passed through to the saga input")
 
-	// GetPayout отдает маркер возврата (CBL-10.6).
+	// GetPayout returns the refund marker (CBL-10.6).
 	getResponse, err := server.GetPayout(context.Background(), &payoutv1.GetPayoutRequest{PayoutId: "p-1"})
 	require.NoError(t, err)
 	assert.Equal(t, refundInvoice, getResponse.GetPayout().GetRefundInvoiceId())

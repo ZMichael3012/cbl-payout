@@ -1,3 +1,3 @@
-// Пакет transport содержит транспортный слой сервиса payout:
-// HTTP-хендлеры Gin и gRPC-обработчики, собранные из usecase.
+// Package transport provides the payout service transport layer:
+// Gin HTTP handlers and gRPC handlers assembled from usecase.
 package transport

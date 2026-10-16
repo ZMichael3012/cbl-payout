@@ -1,10 +1,10 @@
 //go:build e2e
 
-// Пакет e2e содержит сквозной сценарий саги выплаты: CreatePayout кладет
-// команду payout.commands через outbox и relay; внешний «коннектор» читает
-// команду и публикует gateway.payout.events; payout завершает сагу (commit +
-// completed) или компенсирует (release + compensated). Стенд: реальные Kafka
-// и PostgreSQL; Ledger заменен фейком (провайдер - KI-01).
+// Package e2e contains the end-to-end payout saga scenario: CreatePayout puts the
+// payout.commands command through the outbox and relay; the external "connector"
+// reads the command and publishes gateway.payout.events; payout completes the saga
+// (commit + completed) or compensates (release + compensated). Stand: real Kafka
+// and PostgreSQL; Ledger is replaced by a fake (provider - KI-01).
 package e2e
 
 import (
@@ -45,19 +45,19 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// recorderLedger фиксирует операции Ledger для саги.
+// recorderLedger records Ledger operations for the saga.
 type recorderLedger struct {
 	mu       sync.Mutex
 	commits  []string
 	releases []string
 }
 
-// Reserve возвращает детерминированный идентификатор удержания.
+// Reserve returns a deterministic hold identifier.
 func (l *recorderLedger) Reserve(_ context.Context, req usecase.LedgerReserveRequest) (string, error) {
 	return "reserve-" + req.RefID, nil
 }
 
-// CommitReserve фиксирует коммит.
+// CommitReserve records a commit.
 func (l *recorderLedger) CommitReserve(_ context.Context, _, reserveID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -65,7 +65,7 @@ func (l *recorderLedger) CommitReserve(_ context.Context, _, reserveID string) e
 	return nil
 }
 
-// ReleaseReserve фиксирует release.
+// ReleaseReserve records a release.
 func (l *recorderLedger) ReleaseReserve(_ context.Context, _, reserveID, _ string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -128,7 +128,7 @@ func setupSagaE2EKafka(t *testing.T) []string {
 	return brokers
 }
 
-// waitForState ждет состояния выплаты или падает по таймауту контекста.
+// waitForState waits for the payout state or fails on context timeout.
 func waitForState(t *testing.T, ctx context.Context, repo *storage.Repository, id string, want domain.State) storage.Payout {
 	t.Helper()
 	for {
@@ -146,7 +146,7 @@ func waitForState(t *testing.T, ctx context.Context, repo *storage.Repository, i
 	}
 }
 
-// consumeRecords читает записи топика с начала до want штук.
+// consumeRecords reads topic records from the beginning until want records are collected.
 func consumeRecords(t *testing.T, ctx context.Context, brokers []string, topic string, want int) []kgo.Record {
 	t.Helper()
 	consumer, err := kgo.NewClient(
@@ -171,7 +171,7 @@ func consumeRecords(t *testing.T, ctx context.Context, brokers []string, topic s
 	return records
 }
 
-// produceGatewayEvent публикует событие шлюза в gateway.payout.events.
+// produceGatewayEvent publishes a gateway event to gateway.payout.events.
 func produceGatewayEvent(t *testing.T, ctx context.Context, producer *kgo.Client, event *eventsv1.GatewayPayoutEvent) {
 	t.Helper()
 	body, err := proto.Marshal(event)
@@ -225,7 +225,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 	require.NoError(t, err)
 	defer producer.Close()
 
-	// 1. Малая выплата: команда уходит в payout.commands, сага в sent_to_gateway.
+	// 1. Small payout: the command goes to payout.commands, the saga goes to sent_to_gateway.
 	in := usecase.CreatePayoutInput{
 		IdempotencyKey:     "saga-e2e-1",
 		MerchantID:         "m-saga",
@@ -248,8 +248,8 @@ func TestSagaKafkaFlow(t *testing.T) {
 	assert.Equal(t, int64(500_000), command.GetAmount().GetMinorUnits())
 	assert.Equal(t, "payout:"+payout.ID+":command", command.GetIdempotencyKey())
 
-	// 2. Шлюз отправляет submitted (фиксирует gateway_payout_id), затем
-	// подтверждает: commit резерва и completed.
+	// 2. The gateway sends submitted (fixes gateway_payout_id), then
+	// confirms: reserve commit and completed.
 	produceGatewayEvent(t, ctx, producer, &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
 		GatewayPayoutId: "gw-e2e",
@@ -269,7 +269,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 	require.NotNil(t, completed.CompletedAt)
 	assert.Equal(t, []string{"reserve-" + payout.ID}, ledger.commits)
 
-	// 3. payout.events: requested и completed с версиями.
+	// 3. payout.events: requested and completed with versions.
 	events := consumeRecords(t, ctx, brokers, usecase.TopicPayoutEvents, 2)
 	byType := map[string]*eventsv1.PayoutEvent{}
 	for _, record := range events {
@@ -285,7 +285,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED, completedEvent.GetType())
 	require.NotNil(t, completedEvent.GetOccurredAt())
 
-	// 4. Вторая выплата: submitted, затем отказ шлюза - release и compensated.
+	// 4. Second payout: submitted, then gateway rejection - release and compensated.
 	failedInput := in
 	failedInput.IdempotencyKey = "saga-e2e-2"
 	failedPayout, err := saga.Create(ctx, failedInput)
@@ -308,7 +308,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 	waitForState(t, ctx, repo, failedPayout.ID, domain.StateCompensated)
 	assert.Contains(t, ledger.releases, "reserve-"+failedPayout.ID)
 
-	// 5. Возврат (CBL-10.6): тот же путь саги, события несут refund_invoice_id.
+	// 5. Refund (CBL-10.6): the same saga path, events carry refund_invoice_id.
 	refundInput := in
 	refundInput.IdempotencyKey = "saga-e2e-refund"
 	refundInput.RefundInvoiceID = uuid.Must(uuid.NewV7()).String()
@@ -331,10 +331,10 @@ func TestSagaKafkaFlow(t *testing.T) {
 	waitForState(t, ctx, repo, refundPayout.ID, domain.StateCompleted)
 
 	refundEvent := waitForPayoutEvent(t, ctx, brokers, refundPayout.ID, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED)
-	assert.Equal(t, *refundPayout.RefundInvoiceID, refundEvent.GetRefundInvoiceId(), "маркер возврата в событиях")
+	assert.Equal(t, *refundPayout.RefundInvoiceID, refundEvent.GetRefundInvoiceId(), "refund marker in events")
 }
 
-// waitForPayoutEvent ждет в payout.events событие выплаты заданного типа.
+// waitForPayoutEvent waits for a payout event of the given type in payout.events.
 func waitForPayoutEvent(t *testing.T, ctx context.Context, brokers []string, payoutID string, want eventsv1.PayoutEventType) *eventsv1.PayoutEvent {
 	t.Helper()
 	consumer, err := kgo.NewClient(
@@ -365,7 +365,7 @@ func waitForPayoutEvent(t *testing.T, ctx context.Context, brokers []string, pay
 	}
 }
 
-// waitForStateVersion ждет версию состояния (маркер применения submitted).
+// waitForStateVersion waits for the state version (marker of applied submitted).
 func waitForStateVersion(t *testing.T, ctx context.Context, repo *storage.Repository, id string, wantVersion int64) {
 	t.Helper()
 	for {
@@ -383,7 +383,7 @@ func waitForStateVersion(t *testing.T, ctx context.Context, repo *storage.Reposi
 	}
 }
 
-// recordHeader возвращает значение заголовка Kafka-записи.
+// recordHeader returns the header value of a Kafka record.
 func recordHeader(record kgo.Record, key string) []byte {
 	for _, header := range record.Headers {
 		if header.Key == key {

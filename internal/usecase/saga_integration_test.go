@@ -31,7 +31,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// setupSagaDB поднимает PostgreSQL с миграциями и репозиторий с эмиссией событий.
+// setupSagaDB starts PostgreSQL with migrations and a repository with event emission.
 func setupSagaDB(t *testing.T) (*gorm.DB, *storage.Repository) {
 	t.Helper()
 	ctx := context.Background()
@@ -57,7 +57,7 @@ func setupSagaDB(t *testing.T) (*gorm.DB, *storage.Repository) {
 	return db, storage.NewRepository(db, storage.WithEventSink(usecase.NewPayoutEventSink(zap.NewNop())))
 }
 
-// sagaServiceAt собирает сагу с политикой из JSON и фейковым Ledger.
+// sagaServiceAt builds the saga with a JSON policy and a fake Ledger.
 func sagaServiceAt(t *testing.T, repo *storage.Repository, policyRaw string) (*usecase.PayoutService, *usecase.GatewayPayoutConsumer, *fakeLedger) {
 	t.Helper()
 	policy, err := domain.ParseApprovalPolicy(policyRaw)
@@ -68,7 +68,7 @@ func sagaServiceAt(t *testing.T, repo *storage.Repository, policyRaw string) (*u
 	return service, consumer, ledger
 }
 
-// outboxRows возвращает строки outbox по топику в порядке вставки.
+// outboxRows returns outbox rows by topic in insertion order.
 func outboxRows(t *testing.T, db *gorm.DB, topic string) []outbox.Record {
 	t.Helper()
 	var records []outbox.Record
@@ -87,7 +87,7 @@ func TestIntegrationSagaHappyPath(t *testing.T) {
 	require.NotNil(t, payout.ReserveID)
 
 	events := outboxRows(t, db, usecase.TopicPayoutEvents)
-	require.Len(t, events, 1, "создание публикует payout.requested; reserved/sent_to_gateway типа не имеют")
+	require.Len(t, events, 1, "creation publishes payout.requested; reserved/sent_to_gateway have no type")
 	assert.Equal(t, "payout.requested", events[0].Headers[outbox.HeaderEventType])
 	commands := outboxRows(t, db, usecase.TopicPayoutCommands)
 	require.Len(t, commands, 1)
@@ -98,7 +98,7 @@ func TestIntegrationSagaHappyPath(t *testing.T) {
 	assert.Equal(t, payout.DestinationAddress, command.GetAddress())
 	assert.Equal(t, "payout:"+payout.ID+":command", command.GetIdempotencyKey())
 
-	// Результат шлюза: submitted фиксирует gateway_payout_id, confirmed ->
+	// Gateway result: submitted records gateway_payout_id, confirmed ->
 	// commit -> completed.
 	submitted := &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
@@ -176,7 +176,7 @@ func TestIntegrationSagaReserveRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(domain.StateCompensated), payout.State)
 	require.NotNil(t, payout.FailureReason)
-	assert.Empty(t, ledger.releases, "release без резерва не вызывается")
+	assert.Empty(t, ledger.releases, "release is not called without a reserve")
 
 	events := outboxRows(t, db, usecase.TopicPayoutEvents)
 	require.Len(t, events, 3, "requested, failed, compensated")
@@ -195,7 +195,7 @@ func TestIntegrationSagaIdempotentReplay(t *testing.T) {
 	assert.Equal(t, first.ID, second.ID)
 
 	commands := outboxRows(t, db, usecase.TopicPayoutCommands)
-	assert.Len(t, commands, 1, "повтор не порождает вторую команду")
+	assert.Len(t, commands, 1, "a replay does not produce a second command")
 
 	changed := smallPayoutInput()
 	changed.AmountMinor = 42
@@ -213,9 +213,9 @@ func TestIntegrationSagaLargeWaitsApproval(t *testing.T) {
 	assert.Equal(t, string(domain.StateRequested), payout.State)
 	assert.Empty(t, ledger.reserves)
 	assert.Empty(t, outboxRows(t, db, usecase.TopicPayoutCommands))
-	assert.Len(t, outboxRows(t, db, usecase.TopicPayoutEvents), 1, "только payout.requested")
+	assert.Len(t, outboxRows(t, db, usecase.TopicPayoutEvents), 1, "only payout.requested")
 
-	// Апрув продолжает сагу: approved -> reserved -> sent_to_gateway.
+	// Approval continues the saga: approved -> reserved -> sent_to_gateway.
 	ledger2 := &fakeLedger{}
 	service2 := usecase.NewPayoutService(repo, ledger2, mustPolicy(t, `{"default":2}`), zap.NewNop())
 	advanced, err := service2.Advance(ctx, payout.ID)
@@ -238,7 +238,7 @@ func TestIntegrationSagaRefundFlow(t *testing.T) {
 	require.NotNil(t, payout.RefundInvoiceID)
 	assert.Equal(t, refundInvoice, *payout.RefundInvoiceID)
 
-	// Событие создания несет маркер возврата для Notification (refund.*).
+	// The creation event carries the refund marker for Notification (refund.*).
 	events := outboxRows(t, db, usecase.TopicPayoutEvents)
 	require.Len(t, events, 1)
 	var created eventsv1.PayoutEvent
@@ -246,7 +246,7 @@ func TestIntegrationSagaRefundFlow(t *testing.T) {
 	assert.Equal(t, refundInvoice, created.GetRefundInvoiceId())
 	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_REQUESTED, created.GetType())
 
-	// Сага возврата: submitted + confirmed -> commit + completed с маркером.
+	// Refund saga: submitted + confirmed -> commit + completed with the marker.
 	require.NoError(t, consumer.Handle(ctx, nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
 		GatewayPayoutId: "gw-refund",
@@ -271,21 +271,21 @@ func TestIntegrationSagaRefundFlow(t *testing.T) {
 	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED, completedEvent.GetType())
 	assert.Equal(t, refundInvoice, completedEvent.GetRefundInvoiceId())
 
-	// Маркер возврата неизменяем (второй барьер).
+	// The refund marker is immutable (second barrier).
 	res := db.Exec("UPDATE payouts SET refund_invoice_id = NULL, state_version = state_version + 1 WHERE id = ?", payout.ID)
 	require.Error(t, res.Error)
 	assert.Contains(t, res.Error.Error(), "immutable")
 
-	// CHECK-формат на прямом INSERT.
+	// CHECK format on a direct INSERT.
 	rawID := mustUUIDv7(t)
 	badRefund := db.Exec(`INSERT INTO payouts (id, merchant_id, idempotency_key, request_hash, state, amount_minor,
 		amount_asset, amount_decimals, network, destination_address, refund_invoice_id)
 		VALUES (?, 'm-1', 'bad-refund', 'hash', 'requested', 100, 'USDT', 2, 'trc20', 'Taddr', 'not-a-uuid')`, rawID)
-	require.Error(t, badRefund.Error, "невалидный refund_invoice_id отклоняется CHECK-ом")
+	require.Error(t, badRefund.Error, "an invalid refund_invoice_id is rejected by the CHECK")
 	assert.Contains(t, badRefund.Error.Error(), "refund_invoice_id")
 }
 
-// mustUUIDv7 возвращает строку нового UUIDv7.
+// mustUUIDv7 returns the string of a new UUIDv7.
 func mustUUIDv7(t *testing.T) string {
 	t.Helper()
 	id, err := uuid.NewV7()
@@ -293,7 +293,7 @@ func mustUUIDv7(t *testing.T) string {
 	return id.String()
 }
 
-// mustPolicy собирает политику или падает.
+// mustPolicy builds the policy or fails.
 func mustPolicy(t *testing.T, raw string) domain.ApprovalPolicy {
 	t.Helper()
 	policy, err := domain.ParseApprovalPolicy(raw)

@@ -12,7 +12,7 @@ func TestWithTraceparentValidation(t *testing.T) {
 
 	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	ctx := WithTraceparent(context.Background(), valid)
-	assert.Equal(t, valid, traceparentFromContext(ctx), "валидный traceparent сохраняется")
+	assert.Equal(t, valid, traceparentFromContext(ctx), "a valid traceparent is preserved")
 
 	for name, value := range map[string]string{
 		"empty":     "",
@@ -25,9 +25,9 @@ func TestWithTraceparentValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			invalid := WithTraceparent(context.Background(), value)
-			assert.Empty(t, traceparentFromContext(invalid), "невалидный traceparent игнорируется")
+			assert.Empty(t, traceparentFromContext(invalid), "an invalid traceparent is ignored")
 		})
 	}
 
-	assert.Empty(t, traceparentFromContext(context.Background()), "контекст без traceparent пуст")
+	assert.Empty(t, traceparentFromContext(context.Background()), "a context without a traceparent is empty")
 }

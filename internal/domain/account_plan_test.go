@@ -9,8 +9,8 @@ import (
 	"github.com/cbl/cbl-payout/internal/domain"
 )
 
-// TestMerchantAccountGoldenVectors проверяет вывод UUIDv5 счета удержания по
-// golden-векторам CBL-003 §9: расхождение с Ledger недопустимо (KI-ledger-08).
+// TestMerchantAccountGoldenVectors verifies the UUIDv5 derivation of the hold account against
+// the golden vectors of CBL-003 section 9: divergence from Ledger is not allowed (KI-ledger-08).
 func TestMerchantAccountGoldenVectors(t *testing.T) {
 	t.Parallel()
 
@@ -27,7 +27,7 @@ func TestMerchantAccountGoldenVectors(t *testing.T) {
 	for _, tc := range cases {
 		id, err := domain.MerchantAccountID(tc.ref, tc.asset, tc.decimals)
 		require.NoError(t, err)
-		assert.Equal(t, tc.want, id, "ключ merchant/%s/%d/%s", tc.asset, tc.decimals, tc.ref)
+		assert.Equal(t, tc.want, id, "key merchant/%s/%d/%s", tc.asset, tc.decimals, tc.ref)
 	}
 }
 

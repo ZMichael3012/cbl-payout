@@ -12,42 +12,43 @@ import (
 	"github.com/cbl/cbl-payout/internal/domain"
 )
 
-// TransitionEvent описывает примененный переход состояния (включая создание с
-// пустым from) для публикации в payout.events (10.2): снимок выплаты после
-// перехода и служебные поля журнала.
+// TransitionEvent describes an applied state transition (including creation
+// with an empty from) for publication to payout.events (10.2): a payout
+// snapshot after the transition and journal metadata.
 type TransitionEvent struct {
-	// Payout задает снимок выплаты после перехода (включая новую версию).
+	// Payout sets the payout snapshot after the transition (including the new version).
 	Payout Payout
-	// From задает состояние до перехода (пусто для создания).
+	// From sets the state before the transition (empty for creation).
 	From domain.State
-	// To задает состояние после перехода.
+	// To sets the state after the transition.
 	To domain.State
-	// OccurredAt задает время перехода (строка журнала).
+	// OccurredAt sets the transition time (the journal row).
 	OccurredAt time.Time
-	// Traceparent задает W3C trace context для конверта (если известен).
+	// Traceparent sets the W3C trace context for the envelope (if known).
 	Traceparent string
 }
 
-// TransitionEventSink записывает событие payout.events в outbox в транзакции
-// перехода: событие и бизнес-изменение коммитятся или откатываются вместе.
+// TransitionEventSink writes a payout.events event to the outbox in the
+// transition transaction: the event and the business change are committed or
+// rolled back together.
 type TransitionEventSink interface {
-	// AppendTransitionEvent добавляет конверт события в переданной транзакции.
+	// AppendTransitionEvent appends the event envelope in the passed transaction.
 	AppendTransitionEvent(ctx context.Context, tx *gorm.DB, event TransitionEvent) error
 }
 
-// WithEventSink подключает запись payout.events; без sink события не пишутся.
+// WithEventSink enables payout.events writing; without a sink no events are written.
 func WithEventSink(sink TransitionEventSink) Option {
 	return func(r *Repository) { r.eventSink = sink }
 }
 
-// AppendOutbox добавляет конверт в outbox в переданной транзакции: сага 10.2
-// пишет команду payout.commands атомарно с переходами.
+// AppendOutbox appends an envelope to the outbox in the passed transaction:
+// saga 10.2 writes the payout.commands command atomically with transitions.
 func (r *Repository) AppendOutbox(ctx context.Context, tx *gorm.DB, envelope outbox.Envelope) error {
 	return outbox.NewStore().Append(ctx, tx, envelope)
 }
 
-// emitTransitionEvent передает событие sink-у, если он настроен; явно заданный
-// traceparent не затирается значением из контекста.
+// emitTransitionEvent passes the event to the sink if it is configured; an
+// explicitly set traceparent is not overwritten by the context value.
 func (r *Repository) emitTransitionEvent(ctx context.Context, tx *gorm.DB, event TransitionEvent) error {
 	if r.eventSink == nil {
 		return nil
@@ -58,16 +59,16 @@ func (r *Repository) emitTransitionEvent(ctx context.Context, tx *gorm.DB, event
 	return r.eventSink.AppendTransitionEvent(ctx, tx, event)
 }
 
-// traceparentKey задает ключ контекста для W3C traceparent.
+// traceparentKey sets the context key for the W3C traceparent.
 type traceparentKey struct{}
 
-// traceparentPattern задает формат W3C trace context; произвольная строка из
-// заголовка Kafka не должна попадать в конверты и логи downstream.
+// traceparentPattern sets the W3C trace context format; an arbitrary string
+// from a Kafka header must not reach envelopes and downstream logs.
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
-// WithTraceparent сохраняет traceparent в контексте: consumer кладет заголовок
-// события шлюза, и события выплаты наследуют трассировку источника.
-// Невалидный по формату W3C заголовок игнорируется.
+// WithTraceparent stores the traceparent in the context: the consumer puts
+// the gateway event header there, and payout events inherit the source trace.
+// A header that does not match the W3C format is ignored.
 func WithTraceparent(ctx context.Context, traceparent string) context.Context {
 	if !traceparentPattern.MatchString(traceparent) {
 		return ctx
@@ -75,7 +76,7 @@ func WithTraceparent(ctx context.Context, traceparent string) context.Context {
 	return context.WithValue(ctx, traceparentKey{}, traceparent)
 }
 
-// traceparentFromContext извлекает traceparent из контекста.
+// traceparentFromContext extracts the traceparent from the context.
 func traceparentFromContext(ctx context.Context) string {
 	value, _ := ctx.Value(traceparentKey{}).(string)
 	return value

@@ -21,37 +21,37 @@ import (
 	"github.com/cbl/cbl-payout/internal/storage"
 )
 
-// Константы конвейера событий шлюза (CBL-003, раздел 6).
+// Gateway event pipeline constants (CBL-003, section 6).
 const (
-	// TopicGatewayPayoutEvents задает топик результатов выплаты от Connector.
+	// TopicGatewayPayoutEvents sets the topic of payout results from Connector.
 	TopicGatewayPayoutEvents = "gateway.payout.events"
-	// ConsumerGroupGatewayPayouts задает группу консьюмера результатов.
+	// ConsumerGroupGatewayPayouts sets the consumer group of the results.
 	ConsumerGroupGatewayPayouts = "cbl-payout-gateway"
-	// maxGatewayIdentifierBytes ограничивает идентификаторы недоверенного события.
+	// maxGatewayIdentifierBytes bounds the identifiers of an untrusted event.
 	maxGatewayIdentifierBytes = 256
 )
 
-// errInvalidGatewayEvent сообщает о некорректном событии шлюза: такой вход
-// штатно уходит в retry-топики и DLQ.
+// errInvalidGatewayEvent reports an invalid gateway event: such input goes to
+// the retry topics and the DLQ by design.
 var errInvalidGatewayEvent = errors.New("usecase: invalid gateway payout event")
 
-// errGatewayTooEarly сообщает, что событие опередило сагу: повтор через
-// retry-топики (команда могла еще не уйти в шлюз).
+// errGatewayTooEarly reports that the event outran the saga: retry through the
+// retry topics (the command may not have reached the gateway yet).
 var errGatewayTooEarly = errors.New("usecase: gateway payout event too early")
 
-// gatewayEventKind задает распознанный тип события шлюза.
+// gatewayEventKind sets the recognized gateway event kind.
 type gatewayEventKind int
 
 const (
-	// gatewayKindSubmitted задает фиксацию отправки.
+	// gatewayKindSubmitted sets the submission recording.
 	gatewayKindSubmitted gatewayEventKind = iota
-	// gatewayKindConfirmed задает подтверждение шлюза.
+	// gatewayKindConfirmed sets the gateway confirmation.
 	gatewayKindConfirmed
-	// gatewayKindFailed задает неудачу шлюза.
+	// gatewayKindFailed sets the gateway failure.
 	gatewayKindFailed
 )
 
-// gatewayEventType переводит proto-enum в доменный вид; false - неизвестное.
+// gatewayEventType maps the proto enum to the domain kind; false means unknown.
 func gatewayEventType(value eventsv1.GatewayPayoutEventType) (gatewayEventKind, bool) {
 	switch value {
 	case eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED:
@@ -65,35 +65,35 @@ func gatewayEventType(value eventsv1.GatewayPayoutEventType) (gatewayEventKind, 
 	}
 }
 
-// gatewayAction задает действие консьюмера по событию и состоянию выплаты.
+// gatewayAction sets the consumer action for the event and payout state.
 type gatewayAction int
 
 const (
-	// actionStale задает устаревшее событие: подтверждается без эффекта.
+	// actionStale sets a stale event: it is acknowledged with no effect.
 	actionStale gatewayAction = iota
-	// actionTooEarly задает событие раньше саги: повторяется.
+	// actionTooEarly sets an event ahead of the saga: it is retried.
 	actionTooEarly
-	// actionSubmitted задает фиксацию данных отправки (self-переход).
+	// actionSubmitted sets the recording of the submission data (a self-transition).
 	actionSubmitted
-	// actionCompleted задает завершение: commit резерва и completed.
+	// actionCompleted sets completion: reserve commit and completed.
 	actionCompleted
-	// actionCompensate задает неудачу: failed и release (компенсация).
+	// actionCompensate sets failure: failed and release (compensation).
 	actionCompensate
 )
 
-// GatewayEventStore описывает операции хранилища, нужные консьюмеру: чтение
-// под row-локом и переходы в транзакции Guard (tx от kit inbox Processor).
-// Row-лок сериализует вердикты по одной выплате: конкурентные confirmed и
-// failed не могут одновременно дойти до Ledger до CAS.
+// GatewayEventStore describes the storage operations needed by the consumer:
+// reads under a row lock and transitions in the Guard transaction (the tx of
+// the kit inbox Processor). The row lock serializes verdicts for a single
+// payout: concurrent confirmed and failed cannot both reach Ledger before CAS.
 type GatewayEventStore interface {
-	// PayoutForUpdate возвращает выплату под row-локом в переданной транзакции.
+	// PayoutForUpdate returns the payout under a row lock in the given transaction.
 	PayoutForUpdate(ctx context.Context, tx *gorm.DB, id string) (storage.Payout, error)
-	// TransitionTx выполняет переход состояния в переданной транзакции.
+	// TransitionTx performs a state transition in the given transaction.
 	TransitionTx(ctx context.Context, tx *gorm.DB, id string, expectedVersion uint64, to domain.State, patch storage.TransitionPatch) (storage.Payout, error)
 }
 
-// GatewayPayoutConsumer переводит результаты шлюза (submitted/confirmed/failed)
-// в переходы саги: commit резерва перед completed, release перед compensated.
+// GatewayPayoutConsumer maps gateway results (submitted/confirmed/failed) to
+// saga transitions: reserve commit before completed, release before compensated.
 type GatewayPayoutConsumer struct {
 	store    GatewayEventStore
 	ledger   LedgerClient
@@ -102,10 +102,10 @@ type GatewayPayoutConsumer struct {
 	clock    func() time.Time
 }
 
-// GatewayOption настраивает GatewayPayoutConsumer.
+// GatewayOption configures GatewayPayoutConsumer.
 type GatewayOption func(*GatewayPayoutConsumer)
 
-// WithGatewayClock задает источник времени (completed_at, тестовый шов).
+// WithGatewayClock sets the time source (completed_at, test seam).
 func WithGatewayClock(clock func() time.Time) GatewayOption {
 	return func(c *GatewayPayoutConsumer) {
 		if clock != nil {
@@ -114,7 +114,7 @@ func WithGatewayClock(clock func() time.Time) GatewayOption {
 	}
 }
 
-// NewGatewayPayoutConsumer создает GatewayPayoutConsumer.
+// NewGatewayPayoutConsumer creates a GatewayPayoutConsumer.
 func NewGatewayPayoutConsumer(store GatewayEventStore, ledger LedgerClient, log *zap.Logger, opts ...GatewayOption) *GatewayPayoutConsumer {
 	if log == nil {
 		log = zap.NewNop()
@@ -132,8 +132,8 @@ func NewGatewayPayoutConsumer(store GatewayEventStore, ledger LedgerClient, log 
 	return consumer
 }
 
-// Handle обрабатывает событие шлюза в транзакции Guard: проверяет вход,
-// планирует действие по состоянию и применяет переходы с CAS-повторами.
+// Handle processes a gateway event in the Guard transaction: it validates the
+// input, plans the action by state and applies transitions with CAS retries.
 func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inbox.Message) error {
 	traceparent := msg.Headers[outbox.HeaderTraceparent]
 	ctx = storage.WithTraceparent(ctx, traceparent)
@@ -143,8 +143,8 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 	}
 	eventType, known := gatewayEventType(event.GetType())
 	if !known {
-		// Неизвестные значения enum (BACKWARD_TRANSITIVE может добавить типы)
-		// подтверждаются без эффекта, как у consumer-а платежей (4.3).
+		// Unknown enum values (BACKWARD_TRANSITIVE may add types) are
+		// acknowledged with no effect, as in the payments consumer (4.3).
 		c.log.Warn("gateway payout event without known type skipped",
 			zap.String("payout_id", shortGatewayID(event.GetPayoutId())),
 			zap.String("type", event.GetType().String()),
@@ -157,19 +157,19 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 	payoutID := canonicalUUID(event.GetPayoutId())
 
 	for attempt := 0; attempt < c.attempts; attempt++ {
-		// Row-лок сериализует вердикты по выплате: внешние операции Ledger
-		// не могут перемешаться с конкурентным событием.
+		// The row lock serializes verdicts for the payout: external Ledger
+		// operations cannot interleave with a concurrent event.
 		payout, err := c.store.PayoutForUpdate(ctx, tx, payoutID)
 		if err != nil {
-			// Событие не может опередить создание выплаты: повтор.
+			// An event cannot outrun payout creation: retry.
 			return fmt.Errorf("usecase: gateway event: load payout %s: %w", shortGatewayID(event.GetPayoutId()), err)
 		}
 		if err := validateEventFee(&event, payout); err != nil {
 			return err
 		}
-		// Привязка вердикта к команде: confirmed/failed обязаны нести
-		// gateway_payout_id, совпадающий с зафиксированным submitted -
-		// подделанное событие не завершает и не компенсирует выплату (DLQ).
+		// Verdict binding to the command: confirmed/failed must carry a
+		// gateway_payout_id matching the recorded submitted, so a forged event
+		// does not complete or compensate the payout (DLQ).
 		if eventType != gatewayKindSubmitted {
 			if bindingErr := validateVerdictBinding(payout, &event); bindingErr != nil {
 				return bindingErr
@@ -207,8 +207,8 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 				return ErrSagaUnavailable
 			}
 			if payout.ReserveID == nil || *payout.ReserveID == "" {
-				// Подтверждение без резерва невозможно по саге: DLQ, в Ledger
-				// не обращаемся.
+				// Confirmation without a reserve is impossible by the saga:
+				// DLQ, Ledger is not called.
 				return fmt.Errorf("%w: confirmed without reserve", errInvalidGatewayEvent)
 			}
 			if err := c.ledger.CommitReserve(ctx, "payout:"+payout.ID+":commit", *payout.ReserveID); err != nil {
@@ -257,7 +257,7 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 	return fmt.Errorf("usecase: gateway payout event for %s: %w", shortGatewayID(event.GetPayoutId()), domain.ErrStateConflict)
 }
 
-// applyTransition выполняет CAS-переход; false - конфликт версии (повтор).
+// applyTransition performs a CAS transition; false means a version conflict (retry).
 func (c *GatewayPayoutConsumer) applyTransition(ctx context.Context, tx *gorm.DB, payout storage.Payout, to domain.State, patch storage.TransitionPatch, logMessage string) (bool, error) {
 	updated, err := c.store.TransitionTx(ctx, tx, payout.ID, uint64(payout.StateVersion), to, patch) //nolint:gosec // CHECK >= 1
 	if errors.Is(err, domain.ErrStateConflict) {
@@ -273,8 +273,8 @@ func (c *GatewayPayoutConsumer) applyTransition(ctx context.Context, tx *gorm.DB
 	return true, nil
 }
 
-// compensate переводит выплату в failed (если еще нет) и в compensated одним
-// CAS-планом; release уже выполнен вызывающим.
+// compensate moves the payout to failed (if not yet) and then to compensated
+// in one CAS plan; release has already been performed by the caller.
 func (c *GatewayPayoutConsumer) compensate(ctx context.Context, tx *gorm.DB, payout storage.Payout, state domain.State, event *eventsv1.GatewayPayoutEvent) (bool, error) {
 	current := payout
 	if state == domain.StateSentToGateway {
@@ -310,7 +310,7 @@ func (c *GatewayPayoutConsumer) compensate(ctx context.Context, tx *gorm.DB, pay
 	return true, nil
 }
 
-// planGatewayEvent планирует действие по состоянию выплаты и виду события.
+// planGatewayEvent plans the action by payout state and event kind.
 func planGatewayEvent(state domain.State, eventType gatewayEventKind) (gatewayAction, error) {
 	early := state == domain.StateRequested || state == domain.StateApproved || state == domain.StateReserved
 	switch eventType {
@@ -346,8 +346,8 @@ func planGatewayEvent(state domain.State, eventType gatewayEventKind) (gatewayAc
 	}
 }
 
-// validateGatewayEvent проверяет недоверенное событие шлюза: идентификаторы,
-// лимиты длин, управляющие символы и обязательный gateway_payout_id вердикта.
+// validateGatewayEvent validates the untrusted gateway event: identifiers,
+// length limits, control characters and the mandatory verdict gateway_payout_id.
 func validateGatewayEvent(event *eventsv1.GatewayPayoutEvent, eventType gatewayEventKind) error {
 	if _, err := uuid.Parse(event.GetPayoutId()); err != nil {
 		return fmt.Errorf("%w: payout_id", errInvalidGatewayEvent)
@@ -381,8 +381,9 @@ func validateGatewayEvent(event *eventsv1.GatewayPayoutEvent, eventType gatewayE
 	return nil
 }
 
-// validateVerdictBinding сверяет идентификатор шлюза вердикта с записанным
-// submitted: подтверждение или неудача без реальной отправки не принимаются.
+// validateVerdictBinding compares the verdict gateway identifier with the
+// recorded submitted: a confirmation or failure without a real submission is
+// not accepted.
 func validateVerdictBinding(payout storage.Payout, event *eventsv1.GatewayPayoutEvent) error {
 	if payout.GatewayPayoutID == nil || *payout.GatewayPayoutID == "" {
 		return fmt.Errorf("%w: verdict before submitted", errInvalidGatewayEvent)
@@ -393,7 +394,7 @@ func validateVerdictBinding(payout storage.Payout, event *eventsv1.GatewayPayout
 	return nil
 }
 
-// validateEventFee сверяет реквизиты комиссии с ожидаемыми реквизитами выплаты.
+// validateEventFee compares the fee details with the expected payout details.
 func validateEventFee(event *eventsv1.GatewayPayoutEvent, payout storage.Payout) error {
 	fee := event.GetFee()
 	if fee == nil {
@@ -407,7 +408,7 @@ func validateEventFee(event *eventsv1.GatewayPayoutEvent, payout storage.Payout)
 	return nil
 }
 
-// submittedPatch собирает патч данных отправки из события.
+// submittedPatch builds the submission data patch from the event.
 func submittedPatch(event *eventsv1.GatewayPayoutEvent) storage.TransitionPatch {
 	patch := storage.TransitionPatch{Reason: "gateway submitted"}
 	if gatewayID := strings.TrimSpace(event.GetGatewayPayoutId()); gatewayID != "" {
@@ -419,7 +420,7 @@ func submittedPatch(event *eventsv1.GatewayPayoutEvent) storage.TransitionPatch 
 	return patch
 }
 
-// canonicalUUID приводит валидный UUID к канонической форме.
+// canonicalUUID brings a valid UUID to its canonical form.
 func canonicalUUID(raw string) string {
 	parsed, err := uuid.Parse(raw)
 	if err != nil {
@@ -428,7 +429,7 @@ func canonicalUUID(raw string) string {
 	return parsed.String()
 }
 
-// shortGatewayID усекает идентификатор для логов и ошибок.
+// shortGatewayID truncates an identifier for logs and errors.
 func shortGatewayID(raw string) string {
 	if len(raw) <= 64 {
 		return raw

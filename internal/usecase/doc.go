@@ -1,3 +1,3 @@
-// Пакет usecase содержит сценарии использования сервиса payout:
-// оркестрацию доменных правил, транзакций и публикации событий.
+// Package usecase contains the use cases of the payout service:
+// orchestration of domain rules, transactions and event publication.
 package usecase

@@ -10,30 +10,30 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Approval описывает строку журнала голосов операторов payout_approvals.
+// Approval describes a row of the payout_approvals operator vote journal.
 type Approval struct {
-	// ID задает порядковый номер записи журнала.
+	// ID sets the sequential journal record number.
 	ID int64 `gorm:"column:id;primaryKey"`
-	// PayoutID задает выплату голосования.
+	// PayoutID sets the payout being voted on.
 	PayoutID string `gorm:"column:payout_id"`
-	// OperatorID задает оператора, оставившего голос.
+	// OperatorID sets the operator who cast the vote.
 	OperatorID string `gorm:"column:operator_id"`
-	// Approve задает решение оператора (false - отклонение).
+	// Approve sets the operator decision (false means rejection).
 	Approve bool `gorm:"column:approve"`
-	// Reason задает причину решения (для отклонения обязательна по смыслу).
+	// Reason sets the decision reason (required in spirit for a rejection).
 	Reason string `gorm:"column:reason"`
-	// Required задает требуемое число операторов на момент голоса (аудит политики).
+	// Required sets the required operator count at vote time (policy audit).
 	Required int `gorm:"column:required"`
-	// CreatedAt задает время голоса.
+	// CreatedAt sets the vote time.
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// TableName задает имя таблицы payout_approvals.
+// TableName sets the payout_approvals table name.
 func (Approval) TableName() string { return "payout_approvals" }
 
-// Transaction выполняет функцию в транзакции репозитория: голос оператора
-// записывается атомарно с возможным переходом состояния (10.5). Ошибки
-// возвращаются без обертки: вызывающий различает бизнес-ошибки через errors.Is.
+// Transaction runs the function in a repository transaction: an operator vote
+// is recorded atomically with a possible state transition (10.5). Errors are
+// returned unwrapped: the caller distinguishes business errors via errors.Is.
 func (r *Repository) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	if fn == nil {
 		return errors.New("storage: nil transaction function")
@@ -41,8 +41,9 @@ func (r *Repository) Transaction(ctx context.Context, fn func(tx *gorm.DB) error
 	return r.db.WithContext(ctx).Transaction(fn)
 }
 
-// PayoutForUpdate возвращает выплату под row-локом в переданной транзакции:
-// конкурентные голоса операторов сериализуются и не расходятся по счетчику.
+// PayoutForUpdate returns the payout under a row lock in the passed
+// transaction: concurrent operator votes are serialized and the counter does
+// not diverge.
 func (r *Repository) PayoutForUpdate(ctx context.Context, tx *gorm.DB, id string) (Payout, error) {
 	db := tx
 	if db == nil {
@@ -60,8 +61,8 @@ func (r *Repository) PayoutForUpdate(ctx context.Context, tx *gorm.DB, id string
 	return payout, nil
 }
 
-// RecordApproval добавляет голос оператора; повторный голос того же оператора
-// идемпотентен (unique (payout_id, operator_id)) и возвращает false.
+// RecordApproval appends an operator vote; a repeated vote by the same
+// operator is idempotent (unique (payout_id, operator_id)) and returns false.
 func (r *Repository) RecordApproval(ctx context.Context, tx *gorm.DB, approval Approval) (bool, error) {
 	db := tx
 	if db == nil {
@@ -80,8 +81,9 @@ func (r *Repository) RecordApproval(ctx context.Context, tx *gorm.DB, approval A
 	return res.RowsAffected == 1, nil
 }
 
-// ApprovalByOperator возвращает голос оператора по выплате (если есть):
-// сервис апрува сверяет решение повтора с зафиксированным (append-only).
+// ApprovalByOperator returns the operator vote for a payout (if any): the
+// approval service compares a repeated decision with the stored one
+// (append-only).
 func (r *Repository) ApprovalByOperator(ctx context.Context, tx *gorm.DB, payoutID, operatorID string) (Approval, bool, error) {
 	db := tx
 	if db == nil {
@@ -100,7 +102,7 @@ func (r *Repository) ApprovalByOperator(ctx context.Context, tx *gorm.DB, payout
 	return approval, true, nil
 }
 
-// ApprovalCount возвращает число голосов по выплате.
+// ApprovalCount returns the number of votes for a payout.
 func (r *Repository) ApprovalCount(ctx context.Context, tx *gorm.DB, payoutID string) (int, error) {
 	db := tx
 	if db == nil {

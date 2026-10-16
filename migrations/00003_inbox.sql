@@ -1,5 +1,5 @@
 -- +goose Up
--- Reference DDL из cbl-kit/migrations/inbox.sql (.specs/CBL-003-contracts.md).
+-- Reference DDL from cbl-kit/migrations/inbox.sql (.specs/CBL-003-contracts.md).
 CREATE TABLE inbox (
     consumer     text        NOT NULL,
     event_id     uuid        NOT NULL,

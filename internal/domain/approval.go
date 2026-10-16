@@ -9,46 +9,46 @@ import (
 	"strings"
 )
 
-// ErrInvalidApprovalPolicy сообщает о некорректной конфигурации политики апрува.
+// ErrInvalidApprovalPolicy reports an invalid approval policy configuration.
 var ErrInvalidApprovalPolicy = errors.New("payout: invalid approval policy")
 
-// Границы политики апрува.
+// Approval policy bounds.
 const (
-	// defaultRequiredApprovals задает число операторов без настройки: fail-safe,
-	// без политики выплата не проходит без двух подтверждений.
+	// defaultRequiredApprovals defines the number of operators without configuration: fail-safe,
+	// without a policy a payout does not pass without two confirmations.
 	defaultRequiredApprovals = 2
-	// maxRequiredApprovals задает верхнюю границу числа операторов.
+	// maxRequiredApprovals defines the upper bound of the operator count.
 	maxRequiredApprovals = 10
 )
 
-// ApprovalTier задает ярус требований апрува по сумме актива.
-// Поля-указатели отделяют отсутствие значения от явного нуля: пропущенный
-// `approvals` или `null` - ошибка конфигурации, а не тихое «апрув не нужен».
+// ApprovalTier defines the approval requirement tier by asset amount.
+// Pointer fields separate a missing value from an explicit zero: a missing
+// `approvals` or `null` is a configuration error, not a silent "approval not required".
 type ApprovalTier struct {
-	// BelowMinor задает верхнюю границу яруса (не включительно) в минимальных единицах.
+	// BelowMinor defines the tier upper bound (exclusive) in minor units.
 	BelowMinor *int64 `json:"below_minor"`
-	// Approvals задает требуемое число операторов яруса.
+	// Approvals defines the required number of operators of the tier.
 	Approvals *int `json:"approvals"`
 }
 
-// ApprovalPolicy задает политику двухэтапного подтверждения: сколько
-// операторов требуется по активу и сумме выплаты. Нулевое значение структуры
-// не сконфигурировано и трактуется как fail-safe (два оператора).
+// ApprovalPolicy defines the two-step confirmation policy: how many
+// operators are required per asset and payout amount. The zero value of the struct
+// is not configured and is treated as fail-safe (two operators).
 type ApprovalPolicy struct {
 	tiers      map[string][]ApprovalTier
 	fallback   int
 	configured bool
 }
 
-// DefaultApprovalPolicy создает политику по умолчанию: два оператора.
+// DefaultApprovalPolicy creates the default policy: two operators.
 func DefaultApprovalPolicy() ApprovalPolicy {
 	return ApprovalPolicy{fallback: defaultRequiredApprovals, configured: true}
 }
 
-// ParseApprovalPolicy разбирает JSON-конфигурацию требований апрува.
-// Пустая строка - политика по умолчанию; ярусы сортируются по сумме.
-// Неизвестные поля ярусов и `null` отклоняются: опечатка в конфигурации
-// апрува не должна молча отключать ручное подтверждение выплат.
+// ParseApprovalPolicy parses the JSON configuration of approval requirements.
+// An empty string means the default policy; tiers are sorted by amount.
+// Unknown tier fields and `null` are rejected: a typo in the approval
+// configuration must not silently disable manual payout confirmation.
 func ParseApprovalPolicy(raw string) (ApprovalPolicy, error) {
 	policy := ApprovalPolicy{fallback: defaultRequiredApprovals, configured: true}
 	raw = strings.TrimSpace(raw)
@@ -116,7 +116,7 @@ func ParseApprovalPolicy(raw string) (ApprovalPolicy, error) {
 	return policy, nil
 }
 
-// strictDecode разбирает JSON-значение, запрещая неизвестные поля и null.
+// strictDecode parses a JSON value, rejecting unknown fields and null.
 func strictDecode[T any](raw json.RawMessage) (T, error) {
 	var value T
 	if err := strictDecodeInto(raw, &value); err != nil {
@@ -125,8 +125,8 @@ func strictDecode[T any](raw json.RawMessage) (T, error) {
 	return value, nil
 }
 
-// strictDecodeInto разбирает JSON в цель, запрещая неизвестные поля и null:
-// json.Decoder молча игнорирует null для скалярных целей.
+// strictDecodeInto parses JSON into the target, rejecting unknown fields and null:
+// json.Decoder silently ignores null for scalar targets.
 func strictDecodeInto(raw json.RawMessage, target any) error {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return errors.New("null value")
@@ -142,9 +142,9 @@ func strictDecodeInto(raw json.RawMessage, target any) error {
 	return nil
 }
 
-// RequiredApprovals возвращает требуемое число операторов для актива и суммы:
-// первый ярус, где сумма строго меньше границы, иначе fallback. Нулевое
-// значение политики (не сконфигурирована) защищено fail-safe значением.
+// RequiredApprovals returns the required number of operators for the asset and amount:
+// the first tier where the amount is strictly below the bound, otherwise the fallback.
+// The zero policy value (not configured) is guarded by the fail-safe value.
 func (p ApprovalPolicy) RequiredApprovals(asset string, amountMinor int64) int {
 	fallback := p.fallback
 	if !p.configured {
@@ -165,8 +165,8 @@ func (p ApprovalPolicy) RequiredApprovals(asset string, amountMinor int64) int {
 	return fallback
 }
 
-// Describe возвращает детерминированное описание эффективной политики для
-// лога конфигурации при старте (без секретов).
+// Describe returns a deterministic description of the effective policy for the
+// startup configuration log (without secrets).
 func (p ApprovalPolicy) Describe() string {
 	assets := make([]string, 0, len(p.tiers))
 	for asset := range p.tiers {
@@ -197,7 +197,7 @@ func (p ApprovalPolicy) Describe() string {
 	return strings.Join(parts, ";")
 }
 
-// validApprovalAsset проверяет код актива политики: 2 - 16 символов латиницы и цифр.
+// validApprovalAsset validates the policy asset code: 2 to 16 Latin letters and digits.
 func validApprovalAsset(asset string) bool {
 	if len(asset) < 2 || len(asset) > 16 {
 		return false

@@ -21,111 +21,114 @@ import (
 	"github.com/cbl/cbl-payout/internal/storage"
 )
 
-// Ошибки саги выплаты.
+// Payout saga errors.
 var (
-	// ErrInvalidPayoutInput сообщает о некорректных входных данных CreatePayout.
+	// ErrInvalidPayoutInput reports invalid CreatePayout input.
 	ErrInvalidPayoutInput = errors.New("usecase: invalid payout input")
-	// ErrIdempotencyConflict сообщает о повторе ключа с другим телом запроса.
+	// ErrIdempotencyConflict reports a key replay with a different request body.
 	ErrIdempotencyConflict = errors.New("usecase: idempotency key reuse")
-	// ErrSagaUnavailable сообщает, что шаг саги недоступен (нет Ledger/Kafka).
+	// ErrSagaUnavailable reports that a saga step is unavailable (no Ledger/Kafka).
 	ErrSagaUnavailable = errors.New("usecase: saga unavailable")
-	// ErrLedgerRejected сообщает о бизнес-отказе Ledger (нет счета, недостаточно
-	// средств): резерв невозможен, выплата завершается failed -> compensated.
+	// ErrLedgerRejected reports a business rejection by Ledger (no account,
+	// insufficient funds): the reserve is impossible, the payout ends failed ->
+	// compensated.
 	ErrLedgerRejected = errors.New("usecase: ledger rejected the operation")
-	// ErrLedgerUnavailable сообщает о транспортной недоступности Ledger:
-	// состояние не меняется, шаг повторяется (операции идемпотентны).
+	// ErrLedgerUnavailable reports transport-level unavailability of Ledger:
+	// the state does not change, the step is retried (operations are idempotent).
 	ErrLedgerUnavailable = errors.New("usecase: ledger unavailable")
 )
 
-// errSagaRetry откатывает конфликтную попытку саги и запускает повтор.
+// errSagaRetry rolls back a conflicting saga attempt and starts a retry.
 var errSagaRetry = errors.New("usecase: saga retry")
 
-// Границы саги.
+// Saga bounds.
 const (
-	// sagaAttempts задает число попыток при конфликте версии состояния.
+	// sagaAttempts sets the number of attempts on a state version conflict.
 	sagaAttempts = 3
 )
 
-// Правила входных данных CreatePayout (как CHECK-и схемы 10.1 и формы 10.5).
-// Идентификатор мерчанта совпадает с планом счетов Ledger (2.6): из него
-// выводится счет удержания, поэтому форматы обязаны совпадать.
+// CreatePayout input rules (same as the CHECK constraints of schema 10.1 and
+// form 10.5). The merchant identifier matches the Ledger chart of accounts
+// (2.6): the hold account is derived from it, so the formats must match.
 var (
 	payoutAssetPattern   = regexp.MustCompile(`^[A-Z0-9]{2,16}$`)
 	payoutMerchantID     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	payoutIdempotencyKey = regexp.MustCompile(`^[A-Za-z0-9._:@-]{1,255}$`)
 )
 
-// LedgerReserveRequest описывает запрос резерва в Ledger (2.4).
+// LedgerReserveRequest describes a reserve request to Ledger (2.4).
 type LedgerReserveRequest struct {
-	// IdempotencyKey задает ключ идемпотентности операции.
+	// IdempotencyKey sets the operation idempotency key.
 	IdempotencyKey string
-	// AccountID задает счет удержания (UUIDv5 плана счетов).
+	// AccountID sets the hold account (UUIDv5 of the chart of accounts).
 	AccountID string
-	// RefID задает бизнес-ссылку удержания (идентификатор выплаты).
+	// RefID sets the business reference of the hold (the payout identifier).
 	RefID string
-	// AmountMinor задает сумму удержания в минимальных единицах.
+	// AmountMinor sets the hold amount in minor units.
 	AmountMinor int64
-	// Asset задает актив суммы.
+	// Asset sets the asset of the amount.
 	Asset string
-	// Decimals задает шкалу суммы.
+	// Decimals sets the scale of the amount.
 	Decimals int
 }
 
-// LedgerClient описывает операции Ledger, нужные саге: резерв, коммит и release
-// идемпотентны по ключам; бизнес-отказы отделены от транспортных ошибок.
+// LedgerClient describes the Ledger operations needed by the saga: reserve,
+// commit and release are idempotent by key; business rejections are kept
+// separate from transport errors.
 type LedgerClient interface {
-	// Reserve создает удержание и возвращает его идентификатор.
+	// Reserve creates a hold and returns its identifier.
 	Reserve(ctx context.Context, req LedgerReserveRequest) (string, error)
-	// CommitReserve превращает удержание в проводку.
+	// CommitReserve turns the hold into a posting.
 	CommitReserve(ctx context.Context, idempotencyKey, reserveID string) error
-	// ReleaseReserve освобождает удержание (компенсация).
+	// ReleaseReserve releases the hold (compensation).
 	ReleaseReserve(ctx context.Context, idempotencyKey, reserveID, reason string) error
 }
 
-// SagaStore описывает операции хранилища, нужные саге: создание, чтение,
-// транзакция саги, locking read, CAS-переходы и запись outbox.
+// SagaStore describes the storage operations needed by the saga: creation,
+// reading, saga transaction, locking read, CAS transitions and outbox writes.
 type SagaStore interface {
-	// Create создает выплату в состоянии requested (10.1).
+	// Create creates a payout in the requested state (10.1).
 	Create(ctx context.Context, payout storage.Payout) error
-	// Payout возвращает выплату по идентификатору.
+	// Payout returns a payout by identifier.
 	Payout(ctx context.Context, id string) (storage.Payout, error)
-	// PayoutByMerchantKey возвращает выплату по ключу идемпотентности.
+	// PayoutByMerchantKey returns a payout by idempotency key.
 	PayoutByMerchantKey(ctx context.Context, merchantID, idempotencyKey string) (storage.Payout, error)
-	// Transaction выполняет функцию в транзакции репозитория.
+	// Transaction runs the function in a repository transaction.
 	Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
-	// PayoutForUpdate возвращает выплату под row-локом.
+	// PayoutForUpdate returns the payout under a row lock.
 	PayoutForUpdate(ctx context.Context, tx *gorm.DB, id string) (storage.Payout, error)
-	// TransitionTx выполняет переход состояния в переданной транзакции.
+	// TransitionTx performs a state transition in the given transaction.
 	TransitionTx(ctx context.Context, tx *gorm.DB, id string, expectedVersion uint64, to domain.State, patch storage.TransitionPatch) (storage.Payout, error)
-	// AppendOutbox добавляет конверт в outbox в переданной транзакции.
+	// AppendOutbox appends an envelope to the outbox in the given transaction.
 	AppendOutbox(ctx context.Context, tx *gorm.DB, envelope outbox.Envelope) error
 }
 
-// CreatePayoutInput описывает вход CreatePayout (CF-1).
+// CreatePayoutInput describes the CreatePayout input (CF-1).
 type CreatePayoutInput struct {
-	// IdempotencyKey задает ключ идемпотентности создания.
+	// IdempotencyKey sets the creation idempotency key.
 	IdempotencyKey string
-	// MerchantID задает мерчанта-владельца выплаты.
+	// MerchantID sets the merchant that owns the payout.
 	MerchantID string
-	// AmountMinor задает сумму в минимальных единицах.
+	// AmountMinor sets the amount in minor units.
 	AmountMinor int64
-	// Asset задает актив суммы.
+	// Asset sets the asset of the amount.
 	Asset string
-	// Decimals задает шкалу суммы.
+	// Decimals sets the scale of the amount.
 	Decimals int
-	// Network задает сеть выплаты.
+	// Network sets the payout network.
 	Network string
-	// DestinationAddress задает адрес получателя.
+	// DestinationAddress sets the recipient address.
 	DestinationAddress string
-	// MerchantRef задает ссылку мерчанта для корреляции.
+	// MerchantRef sets the merchant reference for correlation.
 	MerchantRef string
-	// RefundInvoiceID задает исходный счет возврата: непустое значение
-	// создает возврат тем же путем саги (CBL-10.6).
+	// RefundInvoiceID sets the source refund invoice: a non-empty value
+	// creates a refund along the same saga path (CBL-10.6).
 	RefundInvoiceID string
 }
 
-// PayoutService ведет сагу выплаты: создание, резерв в Ledger, команда
-// Connector через outbox и завершение/компенсацию по результату шлюза.
+// PayoutService runs the payout saga: creation, reserve in Ledger, the
+// Connector command through the outbox, and completion/compensation based on
+// the gateway result.
 type PayoutService struct {
 	store    SagaStore
 	ledger   LedgerClient
@@ -135,10 +138,10 @@ type PayoutService struct {
 	clock    func() time.Time
 }
 
-// PayoutOption настраивает PayoutService.
+// PayoutOption configures PayoutService.
 type PayoutOption func(*PayoutService)
 
-// WithPayoutClock задает источник времени (completed_at терминальных состояний).
+// WithPayoutClock sets the time source (completed_at of terminal states).
 func WithPayoutClock(clock func() time.Time) PayoutOption {
 	return func(s *PayoutService) {
 		if clock != nil {
@@ -147,8 +150,9 @@ func WithPayoutClock(clock func() time.Time) PayoutOption {
 	}
 }
 
-// NewPayoutService создает PayoutService; ledger может быть nil - шаги саги
-// недоступны (ErrSagaUnavailable), апрув-контур 10.5 работает.
+// NewPayoutService creates a PayoutService; ledger may be nil, in which case
+// the saga steps are unavailable (ErrSagaUnavailable) while the approval flow
+// 10.5 works.
 func NewPayoutService(store SagaStore, ledger LedgerClient, policy domain.ApprovalPolicy, log *zap.Logger, opts ...PayoutOption) *PayoutService {
 	if log == nil {
 		log = zap.NewNop()
@@ -167,8 +171,9 @@ func NewPayoutService(store SagaStore, ledger LedgerClient, policy domain.Approv
 	return service
 }
 
-// Create создает заявку на выплату (CF-1): идемпотентно по ключу мерчанта,
-// после создания малая выплата сразу идет в сагу, крупная ждет апрува (10.5).
+// Create creates a payout request (CF-1): idempotent by merchant key; after
+// creation a small payout goes straight into the saga while a large one waits
+// for approval (10.5).
 func (s *PayoutService) Create(ctx context.Context, in CreatePayoutInput) (storage.Payout, error) {
 	in.IdempotencyKey = strings.TrimSpace(in.IdempotencyKey)
 	in.MerchantID = strings.TrimSpace(in.MerchantID)
@@ -229,10 +234,10 @@ func (s *PayoutService) Create(ctx context.Context, in CreatePayoutInput) (stora
 	return s.advance(ctx, created)
 }
 
-// replay возвращает прежнюю выплату по ключу идемпотентности; несовпадение
-// тела запроса - ErrIdempotencyConflict. Повтор с тем же телом возобновляет
-// сагу: транспортный сбой Reserve после фиксации строки не должен оставлять
-// выплату в requested навсегда (Advance идемпотентен).
+// replay returns the previous payout by idempotency key; a request body
+// mismatch is ErrIdempotencyConflict. A replay with the same body resumes the
+// saga: a transport failure of Reserve after the row is committed must not
+// leave the payout in requested forever (Advance is idempotent).
 func (s *PayoutService) replay(ctx context.Context, in CreatePayoutInput, hash string) (storage.Payout, error) {
 	existing, err := s.store.PayoutByMerchantKey(ctx, in.MerchantID, in.IdempotencyKey)
 	if err != nil {
@@ -252,7 +257,7 @@ func (s *PayoutService) replay(ctx context.Context, in CreatePayoutInput, hash s
 	return existing, nil
 }
 
-// Get возвращает выплату по идентификатору.
+// Get returns a payout by identifier.
 func (s *PayoutService) Get(ctx context.Context, payoutID string) (storage.Payout, error) {
 	if _, err := uuid.Parse(payoutID); err != nil {
 		return storage.Payout{}, fmt.Errorf("%w: payout_id", ErrInvalidPayoutInput)
@@ -260,9 +265,9 @@ func (s *PayoutService) Get(ctx context.Context, payoutID string) (storage.Payou
 	return s.store.Payout(ctx, payoutID)
 }
 
-// Advance продолжает сагу для выплат в requested|approved: резерв в Ledger,
-// команда Connector через outbox. Идемпотентен: повтор на другом состоянии
-// возвращает текущую выплату.
+// Advance continues the saga for payouts in requested|approved: reserve in
+// Ledger, the Connector command through the outbox. It is idempotent: a replay
+// on another state returns the current payout.
 func (s *PayoutService) Advance(ctx context.Context, payoutID string) (storage.Payout, error) {
 	if s.ledger == nil {
 		return storage.Payout{}, ErrSagaUnavailable
@@ -284,10 +289,10 @@ func (s *PayoutService) Advance(ctx context.Context, payoutID string) (storage.P
 	return s.advance(ctx, payout)
 }
 
-// advance выполняет шаг «резерв + команда»: Reserve в Ledger, затем одна
-// транзакция БД (reserved, sent_to_gateway, payout.commands) - переход и
-// команда неразделимы. Бизнес-отказ Ledger завершает выплату failed ->
-// compensated без release (резерва нет).
+// advance performs the "reserve + command" step: Reserve in Ledger, then a
+// single DB transaction (reserved, sent_to_gateway, payout.commands), so the
+// transition and the command are inseparable. A business rejection by Ledger
+// ends the payout failed -> compensated without release (there is no reserve).
 func (s *PayoutService) advance(ctx context.Context, payout storage.Payout) (storage.Payout, error) {
 	if s.ledger == nil {
 		return storage.Payout{}, ErrSagaUnavailable
@@ -306,8 +311,8 @@ func (s *PayoutService) advance(ctx context.Context, payout storage.Payout) (sto
 	})
 	if err != nil {
 		if errors.Is(err, ErrLedgerRejected) {
-			// В БД и события уходит каноническая причина без внутренних
-			// деталей Ledger (они остаются только в логах).
+			// The DB and events get the canonical reason without internal
+			// Ledger details (those stay in the logs only).
 			s.log.Warn("payout reserve rejected by ledger",
 				zap.String("payout_id", payout.ID),
 				zap.Error(err))
@@ -331,7 +336,7 @@ func (s *PayoutService) advance(ctx context.Context, payout storage.Payout) (sto
 				return parseErr
 			}
 			if state != domain.StateRequested && state != domain.StateApproved {
-				// Сага уже двинулась (гонка/повтор): идемпотентный возврат.
+				// The saga has already moved (race/replay): idempotent return.
 				result = current
 				return nil
 			}
@@ -381,8 +386,8 @@ func (s *PayoutService) advance(ctx context.Context, payout storage.Payout) (sto
 	return storage.Payout{}, fmt.Errorf("usecase: advance payout %s: %w", payout.ID, domain.ErrStateConflict)
 }
 
-// failWithoutReserve завершает выплату, у которой резерва нет: requested|
-// approved -> failed -> compensated; release не вызывается (T-PAYOUT-03).
+// failWithoutReserve ends a payout that has no reserve: requested|approved ->
+// failed -> compensated; release is not called (T-PAYOUT-03).
 func (s *PayoutService) failWithoutReserve(ctx context.Context, payout storage.Payout, reason string) (storage.Payout, error) {
 	failure := truncateReason(reason)
 	for attempt := 0; attempt < s.attempts; attempt++ {
@@ -452,7 +457,7 @@ func (s *PayoutService) failWithoutReserve(ctx context.Context, payout storage.P
 	return storage.Payout{}, fmt.Errorf("usecase: fail payout %s: %w", payout.ID, domain.ErrStateConflict)
 }
 
-// validateCreatePayout проверяет вход CreatePayout по форматам 10.1.
+// validateCreatePayout validates the CreatePayout input against the 10.1 formats.
 func validateCreatePayout(in CreatePayoutInput) error {
 	switch {
 	case !payoutMerchantID.MatchString(in.MerchantID):
@@ -475,12 +480,12 @@ func validateCreatePayout(in CreatePayoutInput) error {
 	return nil
 }
 
-// createRequestHash считает стабильный хэш тела создания для идемпотентной
-// сверки повторов ключа. Поля кодируются с длиной (length-prefix): склейка
-// через разделитель допускала бы коллизии строк с этим разделителем внутри.
-// Маркер возврата входит в хэш только при непустом значении: хэши обычных
-// выплат, созданных до 10.6, обязаны совпадать (идемпотентный повтор после
-// апгрейда не должен давать ложный конфликт).
+// createRequestHash computes a stable hash of the creation body for idempotent
+// key replay comparison. Fields are length-prefixed: joining through a
+// separator would allow collisions of strings containing that separator
+// internally. The refund marker enters the hash only when non-empty: hashes of
+// ordinary payouts created before 10.6 must match (an idempotent replay after
+// the upgrade must not give a false conflict).
 func createRequestHash(in CreatePayoutInput) string {
 	var builder strings.Builder
 	writeLengthPrefixed := func(value string) {
@@ -500,9 +505,9 @@ func createRequestHash(in CreatePayoutInput) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// canonicalRefundID проверяет и канонизирует исходный счет возврата:
-// пустое значение - обычная выплата, непустое обязано быть UUID
-// (нулевой UUID и строки из одних пробелов отклоняются).
+// canonicalRefundID validates and canonicalizes the source refund invoice:
+// an empty value means an ordinary payout, a non-empty one must be a UUID
+// (the nil UUID and whitespace-only strings are rejected).
 func canonicalRefundID(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
@@ -518,13 +523,13 @@ func canonicalRefundID(raw string) (string, error) {
 	return parsed.String(), nil
 }
 
-// hasControlRunes сообщает о наличии управляющих символов в строке.
+// hasControlRunes reports whether a string contains control characters.
 func hasControlRunes(value string) bool {
 	return strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7F })
 }
 
-// truncateReason усекает причину до лимита схемы по границе руны:
-// разрезанная многобайтовая руна дала бы invalid UTF-8 и отказ БД.
+// truncateReason truncates the reason to the schema limit on a rune boundary:
+// a split multi-byte rune would produce invalid UTF-8 and a DB rejection.
 func truncateReason(reason string) string {
 	if len(reason) <= maxReasonBytes {
 		return reason

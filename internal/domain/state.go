@@ -5,44 +5,44 @@ import (
 	"fmt"
 )
 
-// Ошибки автомата состояний выплаты.
+// Payout state machine errors.
 var (
-	// ErrInvalidState сообщает о неизвестном состоянии.
+	// ErrInvalidState reports an unknown state.
 	ErrInvalidState = errors.New("payout: invalid state")
-	// ErrForbiddenTransition сообщает о переходе, запрещенном матрицей.
+	// ErrForbiddenTransition reports a transition forbidden by the matrix.
 	ErrForbiddenTransition = errors.New("payout: forbidden transition")
-	// ErrTerminalState сообщает о попытке изменить терминальное состояние.
+	// ErrTerminalState reports an attempt to change a terminal state.
 	ErrTerminalState = errors.New("payout: terminal state is immutable")
-	// ErrStateConflict сообщает о конфликте версии состояния (оптимистичная блокировка).
+	// ErrStateConflict reports a state version conflict (optimistic lock).
 	ErrStateConflict = errors.New("payout: state version conflict")
 )
 
-// State задает состояние конечного автомата выплаты.
+// State defines a payout state machine state.
 type State string
 
-// Канонические состояния соответствуют значениям billing.payout.v1.PayoutState
-// (CF-1): имена совпадают по нижнему регистру с суффиксами enum.
+// Canonical states match the billing.payout.v1.PayoutState values
+// (CF-1): the names match the enum suffixes in lowercase.
 const (
-	// StateRequested - заявка создана, лимиты и апрув обрабатываются.
+	// StateRequested means the request is created, limits and approval are being processed.
 	StateRequested State = "requested"
-	// StateApproved - апрув оператора пройден (крупные выплаты, 10.5).
+	// StateApproved means the operator approval passed (large payouts, 10.5).
 	StateApproved State = "approved"
-	// StateReserved - удержание в Ledger создано (шаг саги, 10.2).
+	// StateReserved means the Ledger hold is created (saga step, 10.2).
 	StateReserved State = "reserved"
-	// StateSentToGateway - команда отправлена в Connector (payout.commands).
+	// StateSentToGateway means the command is sent to the Connector (payout.commands).
 	StateSentToGateway State = "sent_to_gateway"
-	// StateCompleted - выплата подтверждена шлюзом.
+	// StateCompleted means the payout is confirmed by the gateway.
 	StateCompleted State = "completed"
-	// StateFailed - внешний шаг завершился неудачей (компенсация впереди).
+	// StateFailed means an external step failed (compensation ahead).
 	StateFailed State = "failed"
-	// StateCompensated - сага закрыта: удержание освобождено или не требовалось.
+	// StateCompensated means the saga is closed: the hold is released or was not required.
 	StateCompensated State = "compensated"
-	// StateRejected - выплата отклонена оператором до резерва.
+	// StateRejected means the payout is rejected by an operator before the reserve.
 	StateRejected State = "rejected"
 )
 
-// transitions задает матрицу разрешенных переходов автомата: единственный
-// источник правил для приложения и основа для второго барьера БД (10.1).
+// transitions defines the matrix of allowed state machine transitions: the single
+// source of rules for the application and the basis for the database second barrier (10.1).
 var transitions = map[State]map[State]struct{}{
 	StateRequested: {
 		StateApproved: {},
@@ -68,14 +68,14 @@ var transitions = map[State]map[State]struct{}{
 	},
 }
 
-// terminalStates задает состояния без исходящих переходов.
+// terminalStates defines the states without outgoing transitions.
 var terminalStates = map[State]struct{}{
 	StateCompleted:   {},
 	StateCompensated: {},
 	StateRejected:    {},
 }
 
-// ParseState разбирает строку в состояние автомата.
+// ParseState parses a string into a state machine state.
 func ParseState(raw string) (State, error) {
 	state := State(raw)
 	if _, ok := transitions[state]; ok {
@@ -87,7 +87,7 @@ func ParseState(raw string) (State, error) {
 	return "", fmt.Errorf("%w: %q", ErrInvalidState, raw)
 }
 
-// AllowedTransition сообщает, разрешен ли переход матрицей.
+// AllowedTransition reports whether the transition is allowed by the matrix.
 func AllowedTransition(from, to State) bool {
 	next, ok := transitions[from]
 	if !ok {
@@ -97,15 +97,15 @@ func AllowedTransition(from, to State) bool {
 	return ok
 }
 
-// Terminal сообщает, является ли состояние терминальным.
+// Terminal reports whether the state is terminal.
 func Terminal(state State) bool {
 	_, ok := terminalStates[state]
 	return ok
 }
 
-// NextVersion проверяет переход и возвращает новую версию состояния.
-// Самопереход (обновление данных саги: gateway_payout_id, fee) допустим
-// только в нетерминальных состояниях; терминальные состояния неизменяемы.
+// NextVersion validates the transition and returns the new state version.
+// A self-transition (saga data update: gateway_payout_id, fee) is allowed
+// only in non-terminal states; terminal states are immutable.
 func NextVersion(from, to State, version uint64) (uint64, error) {
 	if version == 0 {
 		return 0, fmt.Errorf("%w: zero version", ErrStateConflict)

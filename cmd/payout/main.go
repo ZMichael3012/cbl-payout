@@ -1,4 +1,4 @@
-// main запускает HTTP- и gRPC-сервис payout платформы CBL.
+// main starts the HTTP and gRPC payout service of the CBL platform.
 package main
 
 import (
@@ -38,7 +38,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// main поднимает gRPC-сервер сервиса, административный HTTP-сервер и сервер метрик.
+// main starts the service gRPC server, the administrative HTTP server and the metrics server.
 func main() {
 	log, err := zap.NewProduction()
 	if err != nil {
@@ -55,8 +55,8 @@ func main() {
 		fatal(log, "connect postgres failed", zap.Error(err))
 	}
 
-	// Пул ограничен по образцу леджера (T-LED-04): gRPC и фоновая сага (10.2)
-	// делят соединения, опечатка в env не должна исчерпать max_connections.
+	// The pool is capped following the ledger pattern (T-LED-04): gRPC and the background saga (10.2)
+	// share connections; a typo in env must not exhaust max_connections.
 	sqlDB, err := db.DB()
 	if err != nil {
 		fatal(log, "resolve sql db failed", zap.Error(err))
@@ -87,8 +87,8 @@ func main() {
 	}
 	log.Info("payout approval policy configured", zap.String("policy", policy.Describe()))
 
-	// Клиент Ledger нужен саге (10.2): без LEDGER_ADDR шаги саги недоступны,
-	// апрув-контур 10.5 работает.
+	// The Ledger client is needed by the saga (10.2): without LEDGER_ADDR the saga steps are unavailable,
+	// while the approval flow 10.5 works.
 	var ledgerClient usecase.LedgerClient
 	if ledgerAddr := os.Getenv("LEDGER_ADDR"); ledgerAddr != "" {
 		client, dialErr := ledgerclient.Dial(ledgerAddr)
@@ -213,7 +213,7 @@ func main() {
 	log.Info("shutdown finished")
 }
 
-// metricsHandler отдает заглушку метрик до задачи 0.7.
+// metricsHandler serves the metrics stub until task 0.7.
 func metricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -223,14 +223,14 @@ func metricsHandler() http.Handler {
 	return mux
 }
 
-// fatal логирует фатальную ошибку старта и завершает процесс с ненулевым
-// кодом: оркестратор должен видеть неуспех, а не «успешный» выход.
+// fatal logs a fatal startup error and terminates the process with a non-zero
+// exit code: the orchestrator must see the failure, not a "successful" exit.
 func fatal(log *zap.Logger, message string, fields ...zap.Field) {
 	log.Error(message, fields...)
 	os.Exit(1)
 }
 
-// getenv возвращает значение переменной окружения или значение по умолчанию.
+// getenv returns the environment variable value or the fallback value.
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -238,8 +238,8 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// getenvInt возвращает положительное целое из переменной окружения
-// или значение по умолчанию.
+// getenvInt returns a positive integer from the environment variable
+// or the fallback value.
 func getenvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -249,8 +249,8 @@ func getenvInt(key string, fallback int) int {
 	return fallback
 }
 
-// splitCSV разбирает список значений из переменной окружения через запятую,
-// отбрасывая пустые элементы и пробелы вокруг них.
+// splitCSV parses a comma-separated list of values from an environment variable,
+// discarding empty elements and surrounding whitespace.
 func splitCSV(raw string) []string {
 	parts := strings.Split(raw, ",")
 	values := make([]string, 0, len(parts))

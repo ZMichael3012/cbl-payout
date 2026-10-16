@@ -1,6 +1,6 @@
 -- +goose Up
--- Возврат - частный случай выплаты (CBL-000, раздел 5): исходный счет возврата
--- хранится для корреляции и маркировки событий refund.* (CBL-10.6).
+-- A refund is a special case of a payout (CBL-000, section 5): the refund source
+-- account is stored for correlation and marking of refund.* events (CBL-10.6).
 ALTER TABLE payouts
     ADD COLUMN refund_invoice_id text
     CHECK (refund_invoice_id IS NULL OR refund_invoice_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
@@ -13,8 +13,8 @@ CREATE OR REPLACE FUNCTION payouts_transition_guard() RETURNS trigger AS $$
 DECLARE
     allowed boolean;
 BEGIN
-    -- Реквизиты получателя, суммы и маркер возврата неизменяемы: подмена
-    -- адреса/сети/ссылки на счет после создания увела бы деньги.
+    -- Recipient details, amounts and the refund marker are immutable: substituting
+    -- the address, network or account reference after creation would divert the money.
     IF NEW.id IS DISTINCT FROM OLD.id
         OR NEW.merchant_id IS DISTINCT FROM OLD.merchant_id
         OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
@@ -29,7 +29,7 @@ BEGIN
         OR NEW.refund_invoice_id IS DISTINCT FROM OLD.refund_invoice_id THEN
         RAISE EXCEPTION 'payouts: immutable fields cannot change';
     END IF;
-    -- Идентификатор удержания Ledger фиксируется при резерве и не меняется.
+    -- The Ledger hold identifier is fixed at reserve time and does not change.
     IF OLD.reserve_id IS NOT NULL AND NEW.reserve_id IS DISTINCT FROM OLD.reserve_id THEN
         RAISE EXCEPTION 'payouts: reserve_id is immutable once set';
     END IF;
@@ -37,8 +37,8 @@ BEGIN
         RAISE EXCEPTION 'payouts: state_version must increment by 1 (got % -> %)',
             OLD.state_version, NEW.state_version;
     END IF;
-    -- Самопереход (обновление данных саги) допустим только в нетерминальных
-    -- состояниях; терминальные неизменяемы.
+    -- A self-transition (saga data update) is allowed only in non-terminal
+    -- states; terminal states are immutable.
     IF NEW.state = OLD.state THEN
         IF OLD.state IN ('completed', 'compensated', 'rejected') THEN
             RAISE EXCEPTION 'payouts: terminal state % is immutable', OLD.state;
@@ -66,8 +66,8 @@ DROP INDEX IF EXISTS payouts_refund_idx;
 ALTER TABLE payouts DROP COLUMN IF EXISTS refund_invoice_id;
 
 -- +goose StatementBegin
--- Восстановление прежнего тела триггера (00001): после отката колонки
--- ссылка на NEW.refund_invoice_id сломала бы любые UPDATE.
+-- Restoration of the previous trigger body (00001): after the column rollback,
+-- a reference to NEW.refund_invoice_id would break any UPDATE.
 CREATE OR REPLACE FUNCTION payouts_transition_guard() RETURNS trigger AS $$
 DECLARE
     allowed boolean;

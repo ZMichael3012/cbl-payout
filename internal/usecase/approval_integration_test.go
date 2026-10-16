@@ -56,7 +56,7 @@ func setupApprovalDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// approvalPayout создает выплату в состоянии requested.
+// approvalPayout creates a payout in the requested state.
 func approvalPayout(t *testing.T, repo *storage.Repository, amountMinor int64) storage.Payout {
 	t.Helper()
 	id, err := uuid.NewV7()
@@ -76,7 +76,7 @@ func approvalPayout(t *testing.T, repo *storage.Repository, amountMinor int64) s
 	return payout
 }
 
-// approvalServiceAt собирает сервис апрува с политикой из JSON.
+// approvalServiceAt builds the approval service with a JSON policy.
 func approvalServiceAt(t *testing.T, repo *storage.Repository, rawPolicy string) *usecase.ApprovalService {
 	t.Helper()
 	policy, err := domain.ParseApprovalPolicy(rawPolicy)
@@ -94,7 +94,7 @@ func TestIntegrationApprovalTwoOperators(t *testing.T) {
 
 	first, err := service.Approve(ctx, payout.ID, "op-1", true, "checked")
 	require.NoError(t, err)
-	assert.Equal(t, string(domain.StateRequested), first.State, "первый голос не переводит в approved")
+	assert.Equal(t, string(domain.StateRequested), first.State, "the first vote does not transition to approved")
 
 	second, err := service.Approve(ctx, payout.ID, "op-2", true, "")
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestIntegrationApprovalRepeatSameOperator(t *testing.T) {
 
 	var votes int64
 	require.NoError(t, db.Table("payout_approvals").Where("payout_id = ?", payout.ID).Count(&votes).Error)
-	assert.Equal(t, int64(1), votes, "повтор голоса не считается дважды")
+	assert.Equal(t, int64(1), votes, "a repeated vote is not counted twice")
 }
 
 func TestIntegrationApprovalReject(t *testing.T) {
@@ -146,16 +146,17 @@ func TestIntegrationApprovalReject(t *testing.T) {
 	require.NotNil(t, rejected.FailureReason)
 	assert.Equal(t, "sanctions hit", *rejected.FailureReason)
 
-	// Отклоненный повторно: идемпотентный успех для голосовавшего, отказ для нового.
+	// Rejected twice: idempotent success for the voter, rejection for a new operator.
 	_, err = service.Approve(ctx, payout.ID, "op-2", false, "sanctions hit")
 	require.NoError(t, err)
 	_, err = service.Approve(ctx, payout.ID, "op-3", true, "")
 	require.ErrorIs(t, err, usecase.ErrPayoutDecided)
 }
 
-// TestIntegrationRejectionEmitsPayoutEvent проверяет, что вето оператора
-// (10.5) эмитит payout.rejected в outbox в транзакции перехода (тип добавлен
-// контрактом CF-3): событие и переход коммитятся вместе.
+// TestIntegrationRejectionEmitsPayoutEvent verifies that an operator veto
+// (10.5) emits payout.rejected to the outbox in the transition transaction
+// (the type was added by contract CF-3): the event and the transition commit
+// together.
 func TestIntegrationRejectionEmitsPayoutEvent(t *testing.T) {
 	db := setupApprovalDB(t)
 	repo := storage.NewRepository(db, storage.WithEventSink(usecase.NewPayoutEventSink(zap.NewNop())))
@@ -171,7 +172,7 @@ func TestIntegrationRejectionEmitsPayoutEvent(t *testing.T) {
 	require.Equal(t, string(domain.StateRejected), rejected.State)
 
 	events := outboxRows(t, db, usecase.TopicPayoutEvents)
-	require.Len(t, events, 2, "запрос и отклонение")
+	require.Len(t, events, 2, "request and rejection")
 	assert.Equal(t, "payout.requested", events[0].Headers[outbox.HeaderEventType])
 	assert.Equal(t, "payout.rejected", events[1].Headers[outbox.HeaderEventType])
 
@@ -181,7 +182,7 @@ func TestIntegrationRejectionEmitsPayoutEvent(t *testing.T) {
 	assert.Equal(t, payout.ID, payload.GetPayoutId())
 	assert.Equal(t, "m-approval", payload.GetMerchantId())
 	assert.Equal(t, "sanctions hit", payload.GetFailureReason())
-	assert.Equal(t, uint64(2), payload.GetStateVersion(), "после создания и вето")
+	assert.Equal(t, uint64(2), payload.GetStateVersion(), "after creation and veto")
 }
 
 func TestIntegrationApprovalNotRequired(t *testing.T) {
@@ -223,7 +224,7 @@ func TestIntegrationApprovalAfterDecided(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(domain.StateApproved), approved.State)
 
-	// Голосовавший повторно - идемпотентный успех; новый оператор - отказ.
+	// A repeat by the voter is an idempotent success; a new operator gets a rejection.
 	again, err := service.Approve(ctx, payout.ID, "op-1", true, "")
 	require.NoError(t, err)
 	assert.Equal(t, string(domain.StateApproved), again.State)
@@ -269,7 +270,7 @@ func TestIntegrationApprovalConcurrentOperators(t *testing.T) {
 			approvedTransitions++
 		}
 	}
-	assert.Equal(t, 1, approvedTransitions, "ровно один переход в approved при гонке голосов")
+	assert.Equal(t, 1, approvedTransitions, "exactly one transition to approved under a vote race")
 }
 
 func TestIntegrationApprovalVoteChangeLocked(t *testing.T) {
@@ -282,7 +283,7 @@ func TestIntegrationApprovalVoteChangeLocked(t *testing.T) {
 	_, err := service.Approve(ctx, payout.ID, "op-1", true, "")
 	require.NoError(t, err)
 
-	// Смена решения тем же оператором: вето не записывается, отказ.
+	// A decision change by the same operator: the veto is not recorded, rejection.
 	_, err = service.Approve(ctx, payout.ID, "op-1", false, "fraud found")
 	require.ErrorIs(t, err, usecase.ErrVoteLocked)
 
@@ -290,7 +291,7 @@ func TestIntegrationApprovalVoteChangeLocked(t *testing.T) {
 	require.NoError(t, db.Table("payout_approvals").
 		Where("payout_id = ? AND operator_id = 'op-1'", payout.ID).
 		Pluck("approve", &stored).Error)
-	assert.True(t, stored, "зафиксированное решение неизменяемо")
+	assert.True(t, stored, "the recorded decision is immutable")
 
 	loaded, _, err := repo.Get(ctx, payout.ID)
 	require.NoError(t, err)
@@ -308,8 +309,8 @@ func TestIntegrationApprovalAfterSagaProgress(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(domain.StateApproved), approved.State)
 
-	// Сага 10.2 двигает выплату дальше: повтор голоса идемпотентен,
-	// новый оператор получает отказ.
+	// Saga 10.2 moves the payout further: a vote replay is idempotent and a
+	// new operator gets a rejection.
 	_, err = repo.Transition(ctx, payout.ID, uint64(approved.StateVersion), domain.StateReserved, storage.TransitionPatch{})
 	require.NoError(t, err)
 
@@ -358,5 +359,5 @@ func TestIntegrationApprovalRequiredSnapshot(t *testing.T) {
 	require.NoError(t, db.Table("payout_approvals").
 		Where("payout_id = ? AND operator_id = 'op-1'", payout.ID).
 		Pluck("required", &required).Error)
-	assert.Equal(t, 2, required, "в голосе зафиксировано требуемое число операторов")
+	assert.Equal(t, 2, required, "the vote records the required number of operators")
 }

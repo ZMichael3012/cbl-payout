@@ -14,9 +14,9 @@ import (
 	"github.com/cbl/cbl-payout/internal/storage"
 )
 
-// TestIntegrationApprovalRollbackOnConflict проверяет на реальной БД, что
-// конфликтная попытка (CAS) откатывает уже записанный голос оператора:
-// errApprovalRetry сервиса апрува полагается на транзакционность.
+// TestIntegrationApprovalRollbackOnConflict checks on a real DB that a
+// conflicting attempt (CAS) rolls back an already recorded operator vote: the
+// approval service errApprovalRetry relies on transactionality.
 func TestIntegrationApprovalRollbackOnConflict(t *testing.T) {
 	db := setupPayoutDB(t)
 	repo := storage.NewRepository(db)
@@ -24,7 +24,7 @@ func TestIntegrationApprovalRollbackOnConflict(t *testing.T) {
 
 	payout := newPayout(t, "approval-rollback-1")
 	require.NoError(t, repo.Create(ctx, payout))
-	payout.StateVersion = 1 // Create фиксирует версию 1
+	payout.StateVersion = 1 // Create fixes version 1
 
 	staleVersion := uint64(payout.StateVersion) + 1
 	err := repo.Transaction(ctx, func(tx *gorm.DB) error {
@@ -36,7 +36,7 @@ func TestIntegrationApprovalRollbackOnConflict(t *testing.T) {
 		}); recordErr != nil {
 			return recordErr
 		}
-		// Устаревшая версия: конфликт откатывает транзакцию целиком.
+		// A stale version: the conflict rolls back the whole transaction.
 		_, transitionErr := repo.TransitionTx(ctx, tx, payout.ID, staleVersion, domain.StateApproved, storage.TransitionPatch{})
 		return transitionErr
 	})
@@ -44,9 +44,9 @@ func TestIntegrationApprovalRollbackOnConflict(t *testing.T) {
 
 	var approvals int64
 	require.NoError(t, db.Table("payout_approvals").Where("payout_id = ?", payout.ID).Count(&approvals).Error)
-	assert.Zero(t, approvals, "голос откачен вместе с конфликтной транзакцией")
+	assert.Zero(t, approvals, "the vote is rolled back with the conflicting transaction")
 
-	// Повторная запись голоса после отката проходит.
+	// Recording the vote again after the rollback succeeds.
 	ok, err := repo.RecordApproval(ctx, nil, storage.Approval{
 		PayoutID:   payout.ID,
 		OperatorID: "op-1",
@@ -57,7 +57,7 @@ func TestIntegrationApprovalRollbackOnConflict(t *testing.T) {
 	assert.True(t, ok)
 }
 
-// TestIntegrationApprovalOperatorConstraints проверяет CHECK-и журнала голосов.
+// TestIntegrationApprovalOperatorConstraints checks the vote journal CHECKs.
 func TestIntegrationApprovalOperatorConstraints(t *testing.T) {
 	db := setupPayoutDB(t)
 	repo := storage.NewRepository(db)
@@ -68,13 +68,13 @@ func TestIntegrationApprovalOperatorConstraints(t *testing.T) {
 
 	badOperator := db.Exec(`INSERT INTO payout_approvals (payout_id, operator_id, approve, required)
 		VALUES (?, 'bad op', true, 2)`, payout.ID)
-	require.Error(t, badOperator.Error, "пробелы в operator_id отклоняются CHECK-ом")
+	require.Error(t, badOperator.Error, "spaces in operator_id are rejected by the CHECK")
 
 	controlReason := db.Exec(`INSERT INTO payout_approvals (payout_id, operator_id, approve, reason, required)
 		VALUES (?, 'op-1', false, 'line' || chr(10) || 'break', 2)`, payout.ID)
-	require.Error(t, controlReason.Error, "управляющие символы в reason отклоняются CHECK-ом")
+	require.Error(t, controlReason.Error, "control characters in reason are rejected by the CHECK")
 
 	zeroRequired := db.Exec(`INSERT INTO payout_approvals (payout_id, operator_id, approve, required)
 		VALUES (?, 'op-2', true, 0)`, payout.ID)
-	require.Error(t, zeroRequired.Error, "required=0 недопустим: голос без требования не пишется")
+	require.Error(t, zeroRequired.Error, "required=0 is invalid: a vote without a requirement is not written")
 }

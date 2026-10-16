@@ -1,5 +1,5 @@
-# Контекст сборки: services/ (нужен доступ к replace на ../cbl-kit и ../cbl-protos).
-# Команда: docker build -f cbl-payout/Dockerfile -t cbl/payout:dev .
+# Build context: services/ (access to the replace directives on ../cbl-kit and ../cbl-protos is required).
+# Command: docker build -f cbl-payout/Dockerfile -t cbl/payout:dev .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY cbl-kit/ /src/cbl-kit/

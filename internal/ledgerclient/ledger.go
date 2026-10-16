@@ -1,6 +1,6 @@
-// Пакет ledgerclient реализует gRPC-клиент Ledger для саги выплат: резерв,
-// коммит и release удержания. Бизнес-отказы отделены от транспортных ошибок:
-// первые завершают выплату компенсацией, вторые - повторяются.
+// Package ledgerclient implements the Ledger gRPC client for the payout saga:
+// reserve, commit and release of the hold. Business rejections are separated from
+// transport errors: the former complete the payout with compensation, the latter are retried.
 package ledgerclient
 
 import (
@@ -19,17 +19,17 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// timeout задает дедлайн вызовов Ledger (CF-1: резерв в бюджете CreatePayout).
+// timeout defines the deadline of Ledger calls (CF-1: reserve within the CreatePayout budget).
 const timeout = time.Second
 
-// Client реализует usecase.LedgerClient поверх gRPC LedgerService.
+// Client implements usecase.LedgerClient over the gRPC LedgerService.
 type Client struct {
 	conn *grpc.ClientConn
 	svc  ledgerv1.LedgerServiceClient
 }
 
-// Dial создает подключение к Ledger (без mTLS до 0.5/0.6; сервисные вызовы -
-// часть периметра доверенной сети, KI-ledger-02/KI-payout-02).
+// Dial creates a connection to Ledger (without mTLS until 0.5/0.6; service calls
+// are part of the trusted network perimeter, KI-ledger-02/KI-payout-02).
 func Dial(target string) (*Client, error) {
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -38,12 +38,12 @@ func Dial(target string) (*Client, error) {
 	return &Client{conn: conn, svc: ledgerv1.NewLedgerServiceClient(conn)}, nil
 }
 
-// Close закрывает подключение.
+// Close closes the connection.
 func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// Reserve создает удержание и возвращает его идентификатор.
+// Reserve creates a hold and returns its identifier.
 func (c *Client) Reserve(ctx context.Context, req usecase.LedgerReserveRequest) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -66,7 +66,7 @@ func (c *Client) Reserve(ctx context.Context, req usecase.LedgerReserveRequest) 
 	return response.GetReserveId(), nil
 }
 
-// CommitReserve превращает удержание в проводку.
+// CommitReserve turns the hold into a posting.
 func (c *Client) CommitReserve(ctx context.Context, idempotencyKey, reserveID string) error {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -77,7 +77,7 @@ func (c *Client) CommitReserve(ctx context.Context, idempotencyKey, reserveID st
 	return classify(err)
 }
 
-// ReleaseReserve освобождает удержание (компенсация неудачной выплаты).
+// ReleaseReserve releases the hold (compensation of a failed payout).
 func (c *Client) ReleaseReserve(ctx context.Context, idempotencyKey, reserveID, reason string) error {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -89,8 +89,8 @@ func (c *Client) ReleaseReserve(ctx context.Context, idempotencyKey, reserveID, 
 	return classify(err)
 }
 
-// classify переводит gRPC-ошибку в договоренности саги: бизнес-отказ
-// (precondition/invalid/not found) против транспортной недоступности.
+// classify maps a gRPC error to the saga contract: a business rejection
+// (precondition/invalid/not found) versus transport unavailability.
 func classify(err error) error {
 	if err == nil {
 		return nil
@@ -103,7 +103,7 @@ func classify(err error) error {
 	}
 }
 
-// decimalsToUint32 безопасно переводит шкалу в uint32 контракта.
+// decimalsToUint32 safely converts the scale to the contract uint32.
 func decimalsToUint32(decimals int) uint32 {
 	if decimals < 0 {
 		return 0

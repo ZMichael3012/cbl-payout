@@ -1,3 +1,3 @@
-// Пакет storage содержит доступ к хранилищам сервиса payout:
-// GORM-репозитории, миграции и интеграцию с outbox/inbox.
+// Package storage provides access to the payout service storages:
+// GORM repositories, migrations and outbox/inbox integration.
 package storage

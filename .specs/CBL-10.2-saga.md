@@ -1,268 +1,272 @@
-# CBL-10.2. Сага выплаты: резерв, команда, результат, компенсация
+# CBL-10.2. Payout saga: reserve, command, result, compensation
 
-| Поле | Значение |
+| Field | Value |
 | :-- | :-- |
-| Эпик | E10, Payout/Refund Service (Saga) |
-| Репозиторий | `cbl-payout` |
-| Размер | L |
-| Волна и параллельная группа | W2-PAYOUT |
-| Зависит от | 10.1, 10.5 (политика апрува), 2.4 (резервы Ledger), CF-2 |
-| Версия контрактов | `cbl-protos@cf-2` (`billing/payout/v1`, `billing/events/v1`) |
-| Статус | done, ревью закрыто |
+| Epic | E10, Payout/Refund Service (Saga) |
+| Repository | `cbl-payout` |
+| Size | L |
+| Wave and parallel group | W2-PAYOUT |
+| Depends on | 10.1, 10.5 (approval policy), 2.4 (Ledger reserves), CF-2 |
+| Contract version | `cbl-protos@cf-2` (`billing/payout/v1`, `billing/events/v1`) |
+| Status | done, review closed |
 
-## 1. Контекст и цель
+## 1. Context and goal
 
-Сага выплаты (`CBL-000` раздел 5): `requested (Ledger Reserve) -> reserved ->
-sent_to_gateway (payout.commands -> Connector) -> completed | failed`, при
-`failed` - компенсация: release удержания (`compensated`); уже проведенные
-операции исправляются сторно, резерв - не проводка (T-LED-06). Внешний шаг
-(шлюз) отделен от внутреннего: команда уходит через `payout.commands` (outbox),
-результат приходит в `gateway.payout.events` (inbox). Неизвестный статус после
-таймаута - задача 10.4; здесь - счастливый путь и компенсация.
+The payout saga (`CBL-000` section 5): `requested (Ledger Reserve) -> reserved ->
+sent_to_gateway (payout.commands -> Connector) -> completed | failed`, and on
+`failed` - compensation: release of the hold (`compensated`); already posted
+operations are corrected by reversal, a reserve is not a posting (T-LED-06). The external
+step (the gateway) is separated from the internal one: the command goes out via
+`payout.commands` (outbox), the result comes in `gateway.payout.events` (inbox). An
+unknown status after a timeout is task 10.4; here - the happy path and compensation.
 
-Задача реализует оркестратор саги поверх контрактов 10.1/10.5:
-`CreatePayout`/`GetPayout` (CF-1), шаг резерва (gRPC Ledger 2.4),
-эмиссию `payout.commands`/`payout.events` через outbox (10.1),
-consumer `gateway.payout.events` и компенсацию.
+The task implements the saga orchestrator on top of the 10.1/10.5 contracts:
+`CreatePayout`/`GetPayout` (CF-1), the reserve step (gRPC Ledger 2.4),
+emission of `payout.commands`/`payout.events` via the outbox (10.1),
+the `gateway.payout.events` consumer and compensation.
 
-## 2. Границы
+## 2. Boundaries
 
-In scope: `CreatePayout`/`GetPayout` (usecase + transport), `Advance` (шаг
-резерва и команды), клиент Ledger (Reserve/Commit/Release), outbox-эмиссия
-событий выплаты (requested/approved/completed/failed/compensated) и команды,
-consumer `gateway.payout.events` (submitted/confirmed/failed), компенсация,
-непрерывность после апрува (10.5), обвязка main (relay, consumer, LEDGER_ADDR),
-тесты unit/integration/e2e (Kafka).
+In scope: `CreatePayout`/`GetPayout` (usecase + transport), `Advance` (the reserve
+and command step), the Ledger client (Reserve/Commit/Release), outbox emission of
+payout events (requested/approved/completed/failed/compensated) and of the command,
+the `gateway.payout.events` consumer (submitted/confirmed/failed), compensation,
+continuation after approval (10.5), main wiring (relay, consumer, LEDGER_ADDR),
+unit/integration/e2e tests (Kafka).
 
-Out of scope: перепроверка статуса после таймаута (10.4 - запрос статуса через
-Connector), восстановление зависших саг фоном (10.4/10.7), реальный провайдер в
-Connector (10.3, KI-01), возвраты (10.6), RBAC операторов (12.x), mTLS (0.5/0.6).
+Out of scope: status re-check after a timeout (10.4 - status request via
+Connector), background recovery of stuck sagas (10.4/10.7), a real provider in
+Connector (10.3, KI-01), refunds (10.6), operator RBAC (12.x), mTLS (0.5/0.6).
 
-## 3. Функциональные требования
+## 3. Functional requirements
 
-FR-1. `CreatePayout` (CF-1): вход `idempotency_key`, `merchant_id`, `amount`
-(Money), `network`, `destination_address`, `merchant_ref`. Валидация: лимиты
-строк (merchant_id `[A-Za-z0-9_-]{1,128}` - форма плана счетов Ledger 2.6,
-ключ 1 - 255, network 1 - 64, адрес 1 - 256, merchant_ref до 255 без
-управляющих символов), amount `> 0`, актив в верхнем регистре 2 - 16 символов,
-decimals 0 - 18; `request_hash` - sha256 канонического представления тела с
-длинами полей (length-prefix: склейка через разделитель допускала бы коллизии
-разных тел). Создание - 10.1 `Create` (`requested`, версия 1): занятый
-`(merchant_id, idempotency_key)` с тем же hash - идемпотентный возврат
-существующей выплаты (повтор возобновляет сагу: если апрув не требуется, а
-выплата в `requested|approved`, выполняется `Advance` - транспортный сбой
-Reserve не оставляет заявку навсегда); с другим hash - `ErrIdempotencyConflict`
-(в транспорт - `AlreadyExists`). После создания: если политика 10.5 требует
-апрув - выплата ждет голосов (гейт), иначе немедленно `Advance`.
+FR-1. `CreatePayout` (CF-1): input `idempotency_key`, `merchant_id`, `amount`
+(Money), `network`, `destination_address`, `merchant_ref`. Validation: string
+limits (merchant_id `[A-Za-z0-9_-]{1,128}` - the Ledger chart of accounts form 2.6,
+key 1 - 255, network 1 - 64, address 1 - 256, merchant_ref up to 255 without
+control characters), amount `> 0`, the asset uppercase 2 - 16 characters,
+decimals 0 - 18; `request_hash` - sha256 of the canonical body representation with
+field lengths (length-prefix: concatenation via a separator would allow collisions of
+different bodies). Creation - 10.1 `Create` (`requested`, version 1): a taken
+`(merchant_id, idempotency_key)` with the same hash - an idempotent return of the
+existing payout (the repeat resumes the saga: if approval is not required and the
+payout is in `requested|approved`, `Advance` is performed - a transport failure of
+Reserve does not leave the request forever); with a different hash -
+`ErrIdempotencyConflict` (to the transport - `AlreadyExists`). After creation: if the
+10.5 policy requires approval - the payout waits for votes (gate), otherwise `Advance`
+immediately.
 
-FR-2. `Advance` (шаг «резерв + команда») для `requested` (апрув не требуется)
-и `approved`: счет удержания - детерминированный UUIDv5 плана счетов Ledger
-(`merchant/<asset>/<decimals>/<merchant_id>`, алгоритм и golden-векторы
-`CBL-003` §9, KI-ledger-08); `Reserve` (gRPC, дедлайн 1 с, ключ
-`payout:{id}:reserve`, `ref_id` = id выплаты). Успех: одна транзакция БД -
-переход в `reserved` (патч `reserve_id`), переход в `sent_to_gateway`,
-outbox-запись `payout.commands` (PayoutCommand: payout_id, amount, network,
-address, idempotency_key `payout:{id}:command`); события `payout.events` для
-`reserved`/`sent_to_gateway` не публикуются (CF-2 их не имеет). Бизнес-отказ
-Ledger (нет счета, недостаточно средств - `InvalidArgument`/`FailedPrecondition`/
-`UnknownAccount`): переход `requested|approved -> failed` с причиной и сразу
-компенсация без release (резерва нет) - `failed -> compensated`. Транспортная
-ошибка (timeout/unavailable): ошибка наверх, сага не двигается - повторный
-`Advance` (клиент 7.4 или 10.4) безопасен: Reserve идемпотентен по ключу.
-Повторный `Advance` при состоянии вне `requested|approved` - идемпотентный
-возврат текущей выплаты.
+FR-2. `Advance` (the "reserve + command" step) for `requested` (approval not
+required) and `approved`: the hold account is a deterministic UUIDv5 of the Ledger
+chart of accounts (`merchant/<asset>/<decimals>/<merchant_id>`, the algorithm and
+golden vectors `CBL-003` §9, KI-ledger-08); `Reserve` (gRPC, deadline 1 s, key
+`payout:{id}:reserve`, `ref_id` = the payout id). Success: one DB transaction - a
+transition to `reserved` (patching `reserve_id`), a transition to `sent_to_gateway`,
+an outbox record of `payout.commands` (PayoutCommand: payout_id, amount, network,
+address, idempotency_key `payout:{id}:command`); `payout.events` events for
+`reserved`/`sent_to_gateway` are not published (CF-2 has none). A business refusal
+by Ledger (no account, insufficient funds - `InvalidArgument`/`FailedPrecondition`/
+`UnknownAccount`): a transition `requested|approved -> failed` with a reason and
+immediate compensation without release (there is no reserve) - `failed -> compensated`.
+A transport error (timeout/unavailable): the error goes up, the saga does not move -
+a repeated `Advance` (client 7.4 or 10.4) is safe: Reserve is idempotent by key.
+A repeated `Advance` in a state outside `requested|approved` - an idempotent return of
+the current payout.
 
-FR-3. Эмиссия `payout.events` (outbox, по образцу payment 4.7): sink на
-`Repository.TransitionTx` и `Create` (событие `payout.requested`); типы
+FR-3. Emission of `payout.events` (outbox, following the payment pattern 4.7): a
+sink on `Repository.TransitionTx` and `Create` (the `payout.requested` event); types
 `requested`, `approved`, `completed`, `failed`, `compensated`; `reserved`,
-`sent_to_gateway`, `rejected` типа не имеют и пропускаются. Конверт: topic
-`payout.events`, key `payout_id`, заголовки `event_type` `payout.<state>`,
-`producer` `cbl-payout`, `schema_version` `v1`, `occurred_at` (зеркалит тело),
-`traceparent` из контекста. Тело `PayoutEvent`: payout_id, merchant_id, type,
-amount (Money), fee (при полной тройке), txid, provider, failure_reason,
+`sent_to_gateway`, `rejected` have no type and are skipped. Envelope: topic
+`payout.events`, key `payout_id`, headers `event_type` `payout.<state>`,
+`producer` `cbl-payout`, `schema_version` `v1`, `occurred_at` (mirrors the body),
+`traceparent` from the context. Body `PayoutEvent`: payout_id, merchant_id, type,
+amount (Money), fee (when the triple is complete), txid, provider, failure_reason,
 state_version, occurred_at.
 
-FR-4. Consumer `gateway.payout.events` (группа `cbl-payout-gateway`, топик +
-retry 5s/1m/10m + DLQ механикой kit; обработка в транзакции Guard, выплата
-читается под row-локом - вердикты одной выплаты сериализуются и не могут
-перемешать commit/release):
-- `submitted`: из `sent_to_gateway` - self-переход с `gateway_payout_id` и
-  `txid`; из `requested`/`approved`/`reserved` - too early (повтор через
-  retry); из терминальных - stale (WARN, ack);
-- `confirmed`: требует непустой `gateway_payout_id`, совпадающий с
-  зафиксированным `submitted` (привязка вердикта к реальной отправке; событие
-  до `submitted` или с чужим идентификатором - DLQ), подтверждение без
-  `reserve_id` - DLQ без обращения к Ledger; далее `CommitReserve` (ключ
-  `payout:{id}:commit`), затем CAS-переход `sent_to_gateway -> completed`
-  (патч txid, fee, completed_at); ошибка Ledger/конфликт - повтор события
-  (commit идемпотентен);
-- `failed`: та же привязка к `gateway_payout_id`; `sent_to_gateway -> failed`
-  (reason) и компенсация: release (при заданном `reserve_id`) перед переходом
-  `failed -> compensated`; для состояния `failed` (повтор события после
-  частичного успеха) - только release + `compensated`; из терминальных - stale.
-Невалидное событие (невалидный payout_id, отрицательная/несовпадающая fee,
-decimals вне 0 - 18, управляющие символы, сверхдлинные строки) - DLQ.
-Неизвестный непустой тип enum подтверждается с WARN (BACKWARD_TRANSITIVE
-может добавить типы, как в 4.3); неизвестный платеж - повтор.
+FR-4. Consumer `gateway.payout.events` (group `cbl-payout-gateway`, the topic +
+retry 5s/1m/10m + DLQ via the kit mechanics; processing in the Guard transaction, the
+payout is read under a row lock - verdicts of one payout are serialized and cannot
+mix up commit/release):
+- `submitted`: from `sent_to_gateway` - a self-transition with `gateway_payout_id`
+  and `txid`; from `requested`/`approved`/`reserved` - too early (retry via the
+  retry topics); from terminal - stale (WARN, ack);
+- `confirmed`: requires a non-empty `gateway_payout_id` matching the fixed
+  `submitted` (binding of the verdict to the actual sending; an event before
+  `submitted` or with a foreign identifier - DLQ), a confirmation without
+  `reserve_id` - DLQ without calling Ledger; then `CommitReserve` (key
+  `payout:{id}:commit`), then a CAS transition `sent_to_gateway -> completed`
+  (patching txid, fee, completed_at); a Ledger error/conflict - event retry
+  (commit is idempotent);
+- `failed`: the same binding to `gateway_payout_id`; `sent_to_gateway -> failed`
+  (reason) and compensation: release (when `reserve_id` is set) before the transition
+  `failed -> compensated`; for the state `failed` (an event repeat after a partial
+  success) - only release + `compensated`; from terminal - stale.
+An invalid event (an invalid payout_id, a negative/mismatched fee,
+decimals outside 0 - 18, control characters, overlong strings) - DLQ.
+An unknown non-empty enum type is acked with a WARN (BACKWARD_TRANSITIVE
+may add types, as in 4.3); an unknown payment - retry.
 
-FR-5. Компенсация: release вызывается только при `reserve_id != NULL`;
-`failed -> compensated` без резерва (отказы до резерва) не обращается к
-Ledger. Порядок «внешняя идемпотентная операция, затем CAS-переход»: сбой
-между шагами безопасен (повтор события/саги доводит), переходы не откатывают
-уже выполненные операции Ledger. Конфликт версии в consumer - повтор плана
-(до 3, как 4.3).
+FR-5. Compensation: release is called only when `reserve_id != NULL`;
+`failed -> compensated` without a reserve (refusals before the reserve) does not call
+Ledger. The order "external idempotent operation, then CAS transition": a failure
+between the steps is safe (an event/saga repeat completes it), transitions do not
+roll back already performed Ledger operations. A version conflict in the consumer -
+plan retry (up to 3, as 4.3).
 
-FR-6. Транспорт: `CreatePayout` (ответ payout_id + state), `GetPayout` (полный
-`Payout`); маппинг ошибок: `storage.ErrNotFound` -> `NotFound`,
-валидация/`ErrIdempotencyConflict` -> `InvalidArgument`/`AlreadyExists`,
+FR-6. Transport: `CreatePayout` (response payout_id + state), `GetPayout` (the full
+`Payout`); error mapping: `storage.ErrNotFound` -> `NotFound`,
+validation/`ErrIdempotencyConflict` -> `InvalidArgument`/`AlreadyExists`,
 `ErrSagaUnavailable`/`ErrLedgerUnavailable` -> `FailedPrecondition`
-(клиент повторяет вызов, операции идемпотентны), конфликты -> `Aborted`;
-`ApprovePayout` - из 10.5.
+(the client repeats the call, the operations are idempotent), conflicts -> `Aborted`;
+`ApprovePayout` - from 10.5.
 
-FR-7. Обвязка: `LEDGER_ADDR` - gRPC-клиент Ledger (deadline 1 с на вызов);
-при `KAFKA_BROKERS` - publisher, relay outbox (команды и события) и consumer
-`gateway.payout.events`; без Ledger/Kafka сервис стартует с WARN, шаг саги
-отвечает `ErrSagaUnavailable`, вердикты шлюза повторяются до настройки Ledger,
-approve-контур 10.5 работает. После успешного апрува (и при идемпотентном
-повторе по одобренной выплате) `ApprovalService` вызывает `Advance`
-best-effort с собственным таймаутом (отмена клиента не убивает шаг): выплата
-продолжает сагу без ручного вмешательства; ошибки логируются, не возвращаются
-клиенту; зависшие `approved` (сбой Advance) - восстановление 10.4/10.7.
+FR-7. Wiring: `LEDGER_ADDR` - the Ledger gRPC client (deadline 1 s per call);
+with `KAFKA_BROKERS` - the publisher, the outbox relay (commands and events) and the
+`gateway.payout.events` consumer; without Ledger/Kafka the service starts with a WARN,
+the saga step answers `ErrSagaUnavailable`, gateway verdicts are retried until Ledger
+is configured, the 10.5 approve flow works. After a successful approval (and on an
+idempotent repeat against an approved payout) `ApprovalService` calls `Advance`
+best-effort with its own timeout (client cancellation does not kill the step): the
+payout continues the saga without manual intervention; errors are logged, not returned
+to the client; stuck `approved` (an Advance failure) - recovery 10.4/10.7.
 
-## 4. Контракты
+## 4. Contracts
 
 - gRPC: `billing.payout.v1.PayoutService` CreatePayout/GetPayout (CF-1);
-  клиент `billing.ledger.v1.LedgerService` Reserve/CommitReserve/ReleaseReserve
-  (дедлайн 1 с; idempotency_key обязателен, `account_id` - UUIDv5 плана).
-- Kafka: продюсер `payout.commands` (ключ payout_id; PayoutCommand) и
-  `payout.events` (PayoutEvent); консьюмер `gateway.payout.events`
-  (GatewayPayoutEvent; группа `cbl-payout-gateway`), retry/DLQ kit.
-- Хранилище: `payouts.reserve_id`, `gateway_payout_id`, `provider`, `txid`,
-  `fee_*` (10.1); outbox (10.1); новых таблиц нет.
+  the `billing.ledger.v1.LedgerService` client Reserve/CommitReserve/ReleaseReserve
+  (deadline 1 s; idempotency_key is mandatory, `account_id` - the plan UUIDv5).
+- Kafka: producer `payout.commands` (key payout_id; PayoutCommand) and
+  `payout.events` (PayoutEvent); consumer `gateway.payout.events`
+  (GatewayPayoutEvent; group `cbl-payout-gateway`), kit retry/DLQ.
+- Storage: `payouts.reserve_id`, `gateway_payout_id`, `provider`, `txid`,
+  `fee_*` (10.1); outbox (10.1); no new tables.
 
-## 5. Модель данных и миграции
+## 5. Data model and migrations
 
-Миграций нет: схема 10.1 содержит все поля саги. `request_hash` создания
-заполняется в FR-1 и используется для идемпотентной сверки повторов.
+No migrations: the 10.1 schema contains all saga fields. The creation `request_hash`
+is filled per FR-1 and is used for the idempotent comparison of repeats.
 
-## 6. Конечные автоматы и правила
+## 6. State machines and rules
 
-Переходы саги по матрице 10.1: `requested -> reserved | failed`,
+Saga transitions follow the 10.1 matrix: `requested -> reserved | failed`,
 `approved -> reserved | failed`, `reserved -> sent_to_gateway | failed`,
-`sent_to_gateway -> completed | failed`, `failed -> compensated`. Все переходы -
-`TransitionTx` (CAS + журнал), события `payout.events` - из FR-3. Порядок
-локов: `payouts` -> `outbox` (порядок 10.5 сохраняется).
+`sent_to_gateway -> completed | failed`, `failed -> compensated`. All transitions -
+`TransitionTx` (CAS + journal), `payout.events` events - from FR-3. Lock order:
+`payouts` -> `outbox` (the 10.5 order is preserved).
 
 ## 7. Edge cases
 
-Повторный `CreatePayout` с тем же ключом и телом (идемпотентный возврат с
-возобновлением саги), с другим телом (`AlreadyExists`; хэш разделяет границы
-полей даже при разделителе внутри значений); повторный `Advance`
-(идемпотентен); Reserve успел, но транзакция записи упала (повтор Reserve по
-ключу вернет тот же reserve_id, дубль удержания невозможен); business-отказ
-Ledger (failed + compensated без release, каноническая причина без внутренних
-деталей); Ledger недоступен (ошибка наверх, состояние не меняется); команда
-опубликована, ответ потерян (10.4); `submitted` после `confirmed` (stale);
-вердикт до `submitted` или с чужим `gateway_payout_id` (DLQ, Ledger не
-вызывается); `confirmed` без резерва (DLQ); `failed` после `completed` (stale,
-WARN); повтор `failed` после `compensated` (release по ключу - идемпотентный
-no-op, переход запрещен - stale); событие для неизвестной выплаты (повтор,
-затем DLQ); невалидное событие, включая управляющие символы и многобайтовые
-строки сверх лимита (DLQ; усечение причины - по границе руны, без invalid
-UTF-8); неизвестный непустой тип enum (WARN, ack); апрув не требуется (малая
-выплата сразу в сагу); апрув требуется (ждет голосов, после апрува -
-continuation); сага без Kafka (команда в outbox, публикация позже).
+A repeated `CreatePayout` with the same key and body (an idempotent return with
+saga resumption), with a different body (`AlreadyExists`; the hash separates field
+boundaries even with a separator inside values); a repeated `Advance`
+(idempotent); Reserve succeeded but the write transaction failed (a repeated Reserve by
+key returns the same reserve_id, a duplicate hold is impossible); a business refusal
+by Ledger (failed + compensated without release, a canonical reason without internal
+details); Ledger unavailable (the error goes up, the state does not change); the
+command is published, the response is lost (10.4); `submitted` after `confirmed` (stale);
+a verdict before `submitted` or with a foreign `gateway_payout_id` (DLQ, Ledger is not
+called); `confirmed` without a reserve (DLQ); `failed` after `completed` (stale,
+WARN); a repeat `failed` after `compensated` (release by key - an idempotent
+no-op, the transition is forbidden - stale); an event for an unknown payout (retry,
+then DLQ); an invalid event, including control characters and multibyte
+strings above the limit (DLQ; reason truncation - at a rune boundary, without invalid
+UTF-8); an unknown non-empty enum type (WARN, ack); approval is not required (a small
+payout goes straight to the saga); approval is required (waits for votes, after the
+approval - continuation); a saga without Kafka (the command is in the outbox,
+publication later).
 
-## 8. Нефункциональные требования
+## 8. Non-functional requirements
 
-Дедлайн CreatePayout 2 с (CF-1): резерв - 1 с, далее транзакция БД;
-идемпотентность всех внешних шагов (ключи Ledger, outbox, inbox); at-least-once
-доставка; consumer - в транзакции Guard (атомарность inbox и переходов);
-логи без сумм и адресов (payout_id, state, версия, ключ операции); traceparent
-из каналов/контекста.
+The CreatePayout deadline of 2 s (CF-1): reserve - 1 s, then the DB transaction;
+idempotency of all external steps (Ledger keys, outbox, inbox); at-least-once
+delivery; the consumer - in the Guard transaction (atomicity of inbox and transitions);
+logs without amounts and addresses (payout_id, state, version, operation key);
+traceparent from channels/context.
 
-## 9. План тестов
+## 9. Test plan
 
-| Уровень | Сценарии |
+| Level | Scenarios |
 | :-- | :-- |
-| Unit (домен) | UUIDv5 счета удержания по golden-векторам (`merchant/USDT/2/m-1` -> `58686062-...`), невалидные ключи |
-| Unit (usecase) | CreatePayout: валидация, идемпотентный повтор, конфликт тела, малая -> Advance, крупная -> гейт; Advance: резерв + две транзакции + команда, business-отказ -> failed+compensated, транспортная ошибка; consumer: план событий по состояниям (submitted/confirmed/failed), stale/too-early, commit/release перед переходами, отсутствие резерва |
-| Integration | реальный PostgreSQL + фейковый Ledger: полный счастливый путь (requested -> reserved -> sent_to_gateway -> completed) с команда-строкой outbox и событиями; компенсация (failed -> release -> compensated); бизнес-отказ резерва; идемпотентные повторы; события `payout.events` из переходов (requested/approved/completed/failed/compensated); журнал и версии |
-| E2E | Kafka + PostgreSQL (testcontainers): `CreatePayout` (usecase) -> outbox -> relay -> `payout.commands`; внешний «коннектор» читает команду и публикует `gateway.payout.events submitted/confirmed` -> payout завершает сагу (commit + completed), `payout.events` содержит requested/completed; ветка failed -> compensated |
+| Unit (domain) | the hold account UUIDv5 against the golden vectors (`merchant/USDT/2/m-1` -> `58686062-...`), invalid keys |
+| Unit (usecase) | CreatePayout: validation, an idempotent repeat, a body conflict, small -> Advance, large -> gate; Advance: reserve + two transactions + command, a business refusal -> failed+compensated, a transport error; consumer: the event plan by state (submitted/confirmed/failed), stale/too-early, commit/release before transitions, a missing reserve |
+| Integration | real PostgreSQL + a fake Ledger: the full happy path (requested -> reserved -> sent_to_gateway -> completed) with the command outbox row and events; compensation (failed -> release -> compensated); a business reserve refusal; idempotent repeats; `payout.events` events from transitions (requested/approved/completed/failed/compensated); the journal and versions |
+| E2E | Kafka + PostgreSQL (testcontainers): `CreatePayout` (usecase) -> outbox -> relay -> `payout.commands`; an external "connector" reads the command and publishes `gateway.payout.events submitted/confirmed` -> payout completes the saga (commit + completed), `payout.events` contains requested/completed; the failed -> compensated branch |
 | Load | 14.1 |
 
-Целевое покрытие unit+integration: не ниже 80%.
+Target unit+integration coverage: at least 80%.
 
-## 10. План работ и коммит
+## 10. Work plan and commit
 
-Тесты вперед (домен, usecase, integration, e2e Kafka), затем domain-вывод счета,
-storage sink событий, usecase/PayoutService + consumer + клиент Ledger,
-transport CreatePayout/GetPayout, обвязка main (relay, consumer, LEDGER_ADDR,
-continuation апрува), AGENTS.md. Коммит
-`CBL-10.2: сага выплаты: резерв, команда, результат, компенсация`; спека в том
-же коммите.
+Tests first (domain, usecase, integration, e2e Kafka), then the domain account
+derivation, the storage event sink, usecase/PayoutService + consumer + Ledger client,
+transport CreatePayout/GetPayout, main wiring (relay, consumer, LEDGER_ADDR,
+approval continuation), AGENTS.md. Commit
+`CBL-10.2: payout saga: reserve, command, result, compensation`; the spec is in the
+same commit.
 
-## 11. Открытые вопросы и решения
+## 11. Open questions and decisions
 
-- Порядок «внешняя идемпотентная операция -> CAS-переход» (не наоборот):
-  terminal-состояния не фиксируются раньше внешнего шага, иначе компенсация
-  или завершение невозможны; повтор события доводит сагу.
-- Вызовы Ledger в consumer-е выполняются внутри транзакции Guard (T-PAYOUT-08):
-  row-лок выплаты сериализует вердикты (конкурентные confirmed/failed не могут
-  перемешать commit и release), внешняя операция идемпотентна, повтор события
-  безопасен; цена - транзакция удерживается до 1 с на вызов, throughput
-  consumer-а ограничен Ledger.
-- `payout.commands` публикуется in-tx вместе с переходом в `sent_to_gateway`
-  (outbox): состояние отражает «команда принята к отправке», реальная отправка -
-  relay/Connector; отличие от «ответа шлюза» документируется в 10.4.
-- Привязка вердиктов: `confirmed`/`failed` обязаны нести `gateway_payout_id`,
-  совпадающий с зафиксированным `submitted`; событие до `submitted` или с чужим
-  идентификатором уходит в DLQ. Это защита от преждевременного commit/release
-  по подделанному событию (KI-payout-02); при пропаже `submitted` (потерянный
-  вебхук) восстановление - 10.4/9.x.
-- `provider` в CF-2 `GatewayPayoutEvent` отсутствует: `submitted` фиксирует
-  `gateway_payout_id`/`txid`, `provider` остается NULL до 10.4 (перепроверка
-  статуса/маршрут) или расширения CF-2 (KI-payout-11).
-- Счёт удержания - merchant-счёт мерчанта по `merchant_id` (как кредитует
-  ledger 2.7, `MerchantAccountKey(merchant_id, asset, decimals)`); `merchant_ref`
-  выплаты - внешняя ссылка мерчанта и в план счетов не входит; форматы
-  `merchant_id` в CreatePayout и плане счетов совпадают.
-- Без Ledger (compose-стенды 10.1/10.5) шаг саги недоступен: `ErrSagaUnavailable`
-  (FailedPrecondition); e2e саги - на testcontainers с фейковым Ledger.
-- Восстановление зависших саг (requested/approved без резерва, failed без
-  компенсации, «orphan» active-резерв после сбоя между Reserve и транзакцией,
-  потерянный `submitted`) фоном - 10.4/10.7 (KI-payout-10); здесь - возобновление
-  при повторе Create/Approve и best-effort continuation.
-- fee и txid приходят из `gateway.payout.events` (CF-2); частичная тройка fee
-  отклоняется (DLQ).
+- The order "external idempotent operation -> CAS transition" (not the other way
+  around): terminal states are not fixed before the external step, otherwise
+  compensation or completion is impossible; an event repeat completes the saga.
+- Ledger calls in the consumer are performed inside the Guard transaction
+  (T-PAYOUT-08): the payout row lock serializes verdicts (concurrent confirmed/failed
+  cannot mix up commit and release), the external operation is idempotent, an event
+  repeat is safe; the cost - the transaction is held up to 1 s per call, the consumer
+  throughput is limited by Ledger.
+- `payout.commands` is published in-tx together with the transition to
+  `sent_to_gateway` (outbox): the state reflects "the command is accepted for sending",
+  the actual sending is relay/Connector; the difference from the "gateway response" is
+  documented in 10.4.
+- Verdict binding: `confirmed`/`failed` must carry a `gateway_payout_id` matching the
+  fixed `submitted`; an event before `submitted` or with a foreign identifier goes to
+  the DLQ. This protects against a premature commit/release on a forged event
+  (KI-payout-02); if `submitted` is lost (a lost webhook), recovery is 10.4/9.x.
+- `provider` is absent in the CF-2 `GatewayPayoutEvent`: `submitted` fixes
+  `gateway_payout_id`/`txid`, `provider` stays NULL until 10.4 (status re-check/route)
+  or a CF-2 extension (KI-payout-11).
+- The hold account is the merchant account by `merchant_id` (as the ledger credits it
+  in 2.7, `MerchantAccountKey(merchant_id, asset, decimals)`); the payout `merchant_ref`
+  is the merchant's external reference and is not part of the chart of accounts; the
+  `merchant_id` formats in CreatePayout and the chart of accounts match.
+- Without Ledger (the 10.1/10.5 compose stands), the saga step is unavailable:
+  `ErrSagaUnavailable` (FailedPrecondition); the saga e2e - on testcontainers with a
+  fake Ledger.
+- Background recovery of stuck sagas (requested/approved without a reserve, failed
+  without compensation, an "orphan" active reserve after a failure between Reserve and
+  the transaction, a lost `submitted`) - 10.4/10.7 (KI-payout-10); here - resumption on
+  a Create/Approve repeat and best-effort continuation.
+- fee and txid come from `gateway.payout.events` (CF-2); a partial fee triple is
+  rejected (DLQ).
 
-## 12. Ревью (CBL-001, шаг 6)
+## 12. Review (CBL-001, step 6)
 
-Четыре независимых прохода (15.10.2026). BLOCKER закрыты: привязка вердиктов -
-`confirmed`/`failed` обязаны нести `gateway_payout_id`, совпадающий с
-зафиксированным `submitted`, вердикт до `submitted` - DLQ без вызова Ledger
-(подделанное событие не завершает и не компенсирует выплату); row-лок выплаты
-в consumer-е сериализует вердикты (commit и release не перемешиваются).
-MAJOR закрыты: `request_hash` переведен на length-prefix (коллизии на границе
-полей невозможны); формат `merchant_id` выровнен с планом счетов Ledger
-(выплата не зависает на выводе счета); повтор `CreatePayout` возобновляет сагу
-(транспортный сбой Reserve не оставляет заявку); continuation апрува вызывается
-и на идемпотентном повторе, с собственным таймаутом (отмена клиента не убивает
-шаг); `ErrLedgerUnavailable` -> FailedPrecondition; из логов убраны суммы,
-`failure_reason` для отказов Ledger канонизирован; усечение причины по границе
-руны; fee decimals и управляющие символы валидируются; `confirmed` без резерва -
-DLQ без вызова Ledger; неизвестный непустой enum - WARN/ack (совместимость
-BACKWARD_TRANSITIVE); AGENTS.md обновлен (T-PAYOUT-08, KI-payout-10/11, runbook).
-MINOR/NIT закрыты: тест classify кодов Ledger, тесты continuation и коллизий
-хэша, ключи идемпотентности проверяются в фейках, `event_type` e2e из типа
-события, ConsumerOption вместо фиктивного сервиса, лог перехода только по факту.
-Принято без изменений: дублирование мелких helper-ов (паттерн платформы),
-`provider` до 10.4 (KI-payout-11), конфигурация без env-override группы
-consumer-а (0.7), testcontainers 0.34.0 (единый набор, govulncheck - 0.2).
+Four independent passes (15.10.2026). BLOCKERs are closed: verdict binding -
+`confirmed`/`failed` must carry a `gateway_payout_id` matching the fixed `submitted`,
+a verdict before `submitted` - DLQ without calling Ledger (a forged event neither
+completes nor compensates the payout); the payout row lock in the consumer serializes
+verdicts (commit and release do not mix).
+MAJORs are closed: `request_hash` switched to length-prefix (collisions at field
+boundaries are impossible); the `merchant_id` format is aligned with the Ledger chart
+of accounts (the payout does not hang on account derivation); a repeated `CreatePayout`
+resumes the saga (a transport failure of Reserve does not leave the request); the
+approval continuation is called on an idempotent repeat as well, with its own
+timeout (client cancellation does not kill the step); `ErrLedgerUnavailable` ->
+FailedPrecondition; amounts are removed from logs, `failure_reason` for Ledger refusals
+is canonicalized; reason truncation is at a rune boundary; fee decimals and control
+characters are validated; `confirmed` without a reserve - DLQ without calling Ledger;
+an unknown non-empty enum - WARN/ack (BACKWARD_TRANSITIVE
+compatibility); AGENTS.md is updated (T-PAYOUT-08, KI-payout-10/11, runbook).
+MINOR/NIT are closed: a test classifying Ledger codes, tests of continuation and hash
+collisions, idempotency keys checked in the fakes, the e2e `event_type` from the event
+type, ConsumerOption instead of a fake service, the transition log only on an actual
+fact. Accepted without changes: duplication of small helpers (the platform pattern),
+`provider` until 10.4 (KI-payout-11), configuration without an env override of the
+consumer group (0.7), testcontainers 0.34.0 (the unified set, govulncheck - 0.2).
 
-| Роль | Ключевые замечания | Закрытие |
+| Role | Key findings | Closure |
 | :-- | :-- | :-- |
-| Без контекста | MAJOR: provider не заполняется (CF-2 без поля), сумма в логах, Internal для ErrLedgerUnavailable, merchant_id несовместим с планом; MINOR: continuation/approved-события/Reserve-после-краша без тестов, confirmed без резерва, fee decimals, байтовое усечение, тавтологичный ассерт, e2e event_type, AGENTS, traceparent; NIT: фиктивный сервис для опций, clock команды, лог перехода, дубли helper-ов | KI-payout-11 + спека; лог очищен; FailedPrecondition; формат выровнен; тесты добавлены; guard добавлен; валидация; усечение по рунам; исправлено; event_type исправлен; AGENTS; зафиксировано; ConsumerOption; принято; исправлено; принято |
-| Архитектуры | BLOCKER: коллизии request_hash; MAJOR: зависание requested/approved (continuation/replay), Ledger в Guard-транзакции без фиксации, merchant_id vs план, provider, AGENTS/KI-02; MINOR: continuation в request-path, байтовое усечение, сумма в логе, unknown enum -> DLQ, Redis-эшелон, testcontainers-понижение; NIT: ConsumerOption, readyz, NotFound-маскировка, порядок outbox | length-prefix + тест; возобновление replay + continuation на повторе + WithoutCancel/таймаут; T-PAYOUT-08; формат выровнен; KI-payout-11; AGENTS + KI-02; собственный таймаут; по рунам; лог очищен; WARN/ack как 4.3; зафиксировано (быстрый путь Redis - 7.4); принято; ConsumerOption; KI до 0.7; как 4.3; T-PAYOUT-08 |
-| С контекстом | BLOCKER: AGENTS.md/спека не закрыты; MAJOR: merchant_id, request_hash, сумма в логе, replay без Advance, provider; MINOR: classify 0%, continuation без теста, конкурентные ветки без тестов, e2e submitted, коды gRPC, consumer без Ledger, compose без LEDGER_ADDR, дубли, ассерты, мёртвый код, ссылка KI, лог, timeout; NIT: ConsumerOption, санитайз reason, go.mod | AGENTS/спека закрыты; исправлено; тесты; continuation-тесты; fake conflicts; e2e submitted; Unavailable; WARN; зафиксировано; принято; исправлено; `_ =` убран; ссылка; лог; 12m; ConsumerOption; канонизация; выровнен по набору |
-| Безопасности | BLOCKER: подделка gateway.payout.events двигает деньги без привязки к команде; MAJOR: суммы/тексты Ledger в логах и событиях, control-символы/UTF-8, гонка commit/release без лока; MINOR: traceparent в логе, коллизии хэша, merchant_id, confirmed без резерва, бизнес-отказ как retry, continuation-ctx, provider, версии, коды; NIT: outbox payload (KI-04), UNSPECIFIED, fee без верхней границы, reflection, фейки | привязка gateway_payout_id + вердикт-до-submitted DLQ + row-лок; канонические причины, суммы убраны; валидация control/UTF-8, усечение по рунам; locking read; зафиксировано; length-prefix; выровнено; guard; зафиксировано в runbook; WithoutCancel/таймаут; KI-payout-11; единый набор, govulncheck в 0.2; FailedPrecondition; KI-04; принято (4.3); принято; KI-08; тесты добавлены |
+| No context | MAJOR: provider is not filled (CF-2 without the field), amounts in logs, Internal for ErrLedgerUnavailable, merchant_id incompatible with the plan; MINOR: continuation/approved events/Reserve-after-crash without tests, confirmed without a reserve, fee decimals, byte truncation, a tautological assert, the e2e event_type, AGENTS, traceparent; NIT: a fake service for options, the command clock, the transition log, duplicated helpers | KI-payout-11 + the spec; the log cleared; FailedPrecondition; the format aligned; tests added; the guard added; validation; truncation by runes; fixed; event_type fixed; AGENTS; recorded; ConsumerOption; accepted; fixed; accepted |
+| Architecture | BLOCKER: request_hash collisions; MAJOR: hanging requested/approved (continuation/replay), Ledger in the Guard transaction without a recorded decision, merchant_id vs the plan, provider, AGENTS/KI-02; MINOR: continuation in the request path, byte truncation, amounts in a log, unknown enum -> DLQ, the Redis tier, a testcontainers downgrade; NIT: ConsumerOption, readyz, NotFound masking, the outbox order | length-prefix + a test; replay resumption + continuation on a repeat + WithoutCancel/timeout; T-PAYOUT-08; the format aligned; KI-payout-11; AGENTS + KI-02; its own timeout; by runes; the log cleared; WARN/ack as 4.3; recorded (the Redis fast path - 7.4); accepted; ConsumerOption; KI until 0.7; as 4.3; T-PAYOUT-08 |
+| With context | BLOCKER: AGENTS.md/the spec is not closed; MAJOR: merchant_id, request_hash, amounts in a log, replay without Advance, provider; MINOR: classify 0%, continuation without a test, concurrent branches without tests, the e2e submitted, gRPC codes, the consumer without Ledger, compose without LEDGER_ADDR, duplications, asserts, dead code, the KI reference, the log, timeout; NIT: ConsumerOption, reason sanitization, go.mod | AGENTS/the spec closed; fixed; tests; continuation tests; fake conflicts; the e2e submitted; Unavailable; WARN; recorded; accepted; fixed; `_ =` removed; the reference; the log; 12m; ConsumerOption; canonicalization; aligned with the set |
+| Security | BLOCKER: forging gateway.payout.events moves money without binding to the command; MAJOR: amounts/Ledger texts in logs and events, control characters/UTF-8, a commit/release race without a lock; MINOR: traceparent in a log, hash collisions, merchant_id, confirmed without a reserve, a business refusal as retry, the continuation ctx, provider, versions, codes; NIT: the outbox payload (KI-04), UNSPECIFIED, fee without an upper bound, reflection, fakes | gateway_payout_id binding + the verdict-before-submitted DLQ + the row lock; canonical reasons, amounts removed; control/UTF-8 validation, truncation by runes; locking read; recorded; length-prefix; aligned; the guard; recorded in the runbook; WithoutCancel/timeout; KI-payout-11; the unified set, govulncheck in 0.2; FailedPrecondition; KI-04; accepted (4.3); accepted; KI-08; tests added |

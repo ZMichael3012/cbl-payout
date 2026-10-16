@@ -22,7 +22,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// gatewayEventMessage собирает inbox-сообщение события шлюза.
+// gatewayEventMessage builds an inbox message of a gateway event.
 func gatewayEventMessage(t *testing.T, event *eventsv1.GatewayPayoutEvent) inbox.Message {
 	t.Helper()
 	body, err := proto.Marshal(event)
@@ -35,8 +35,8 @@ func gatewayEventMessage(t *testing.T, event *eventsv1.GatewayPayoutEvent) inbox
 	}
 }
 
-// consumerFixture собирает консьюмер с выплатой в заданном состоянии;
-// gatewayID фиксирует gateway_payout_id выплаты (привязка вердиктов).
+// consumerFixture builds the consumer with a payout in the given state;
+// gatewayID records the payout gateway_payout_id (verdict binding).
 func consumerFixture(t *testing.T, state domain.State, reserveID, gatewayID *string) (*usecase.GatewayPayoutConsumer, *fakeSagaStore, *fakeLedger, storage.Payout) {
 	t.Helper()
 	store := newFakeSagaStore()
@@ -59,14 +59,14 @@ func consumerFixture(t *testing.T, state domain.State, reserveID, gatewayID *str
 	return consumer, store, ledger, payout
 }
 
-// ptrString возвращает указатель на строку.
+// ptrString returns a pointer to the string.
 func ptrString(value string) *string { return &value }
 
 func TestPlanGatewayEvent(t *testing.T) {
 	t.Parallel()
 
-	// План фиксируется таблицей: слишком раннее событие повторяется, устаревшее
-	// подтверждается, рабочие состояния дают действия саги.
+	// The plan is pinned by the table: a too-early event is retried, a stale
+	// one is acknowledged, working states yield saga actions.
 	tests := []struct {
 		state    domain.State
 		event    eventsv1.GatewayPayoutEventType
@@ -86,7 +86,7 @@ func TestPlanGatewayEvent(t *testing.T) {
 		{domain.StateRejected, eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED, false, true},
 	}
 	for _, tc := range tests {
-		// Привязка: у вердиктов gateway_payout_id совпадает с зафиксированным.
+		// Binding: verdict gateway_payout_id matches the recorded one.
 		consumer, _, _, payout := consumerFixture(t, tc.state, ptrString("reserve-1"), ptrString("gw-1"))
 		err := consumer.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 			PayoutId:        payout.ID,
@@ -118,7 +118,7 @@ func TestGatewayConsumerSubmittedRecordsData(t *testing.T) {
 
 	updated := store.payouts[payout.ID]
 	assert.Equal(t, string(domain.StateSentToGateway), updated.State)
-	assert.Equal(t, int64(5), updated.StateVersion, "self-переход фиксирует данные отправки")
+	assert.Equal(t, int64(5), updated.StateVersion, "the self-transition records the submission data")
 	require.NotNil(t, updated.GatewayPayoutID)
 	assert.Equal(t, "gw-1", *updated.GatewayPayoutID)
 }
@@ -183,7 +183,7 @@ func TestGatewayConsumerFailedReplayWithoutRelease(t *testing.T) {
 	require.NoError(t, consumer.Handle(context.Background(), nil, gatewayEventMessage(t, event)))
 
 	assert.Equal(t, string(domain.StateCompensated), store.payouts[payout.ID].State)
-	assert.Empty(t, ledger.releases, "без резерва release не вызывается")
+	assert.Empty(t, ledger.releases, "release is not called without a reserve")
 	assert.Empty(t, ledger.commits)
 }
 
@@ -200,13 +200,13 @@ func TestGatewayConsumerLedgerUnavailableRetries(t *testing.T) {
 	}
 	err := consumer.Handle(context.Background(), nil, gatewayEventMessage(t, event))
 	require.ErrorIs(t, err, usecase.ErrLedgerUnavailable)
-	assert.Equal(t, string(domain.StateSentToGateway), store.payouts[payout.ID].State, "сбой Ledger не меняет состояние")
+	assert.Equal(t, string(domain.StateSentToGateway), store.payouts[payout.ID].State, "a Ledger failure does not change the state")
 }
 
 func TestGatewayConsumerVerdictBinding(t *testing.T) {
 	t.Parallel()
 
-	// Вердикт до submitted (нет gateway_payout_id) - DLQ-ошибка.
+	// A verdict before submitted (no gateway_payout_id) is a DLQ error.
 	consumer, _, ledger, payout := consumerFixture(t, domain.StateSentToGateway, ptrString("reserve-5"), nil)
 	event := &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
@@ -215,9 +215,9 @@ func TestGatewayConsumerVerdictBinding(t *testing.T) {
 	}
 	err := consumer.Handle(context.Background(), nil, gatewayEventMessage(t, event))
 	require.ErrorContains(t, err, "verdict before submitted")
-	assert.Empty(t, ledger.commits, "Ledger не вызывается до привязки")
+	assert.Empty(t, ledger.commits, "Ledger is not called before binding")
 
-	// Несовпадающий gateway_payout_id - DLQ-ошибка.
+	// A mismatching gateway_payout_id is a DLQ error.
 	consumer2, _, ledger2, payout2 := consumerFixture(t, domain.StateSentToGateway, ptrString("reserve-6"), ptrString("gw-6"))
 	event2 := &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout2.ID,
@@ -228,14 +228,14 @@ func TestGatewayConsumerVerdictBinding(t *testing.T) {
 	require.ErrorContains(t, err, "gateway_payout_id mismatch")
 	assert.Empty(t, ledger2.releases)
 
-	// Вердикт без gateway_payout_id - DLQ-ошибка.
+	// A verdict without gateway_payout_id is a DLQ error.
 	err = consumer2.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 		PayoutId: payout2.ID,
 		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
 	}))
 	require.ErrorContains(t, err, "gateway_payout_id is required")
 
-	// confirmed без резерва - DLQ-ошибка без обращения к Ledger.
+	// confirmed without a reserve is a DLQ error with no Ledger call.
 	consumer3, _, ledger3, payout3 := consumerFixture(t, domain.StateSentToGateway, nil, ptrString("gw-7"))
 	err = consumer3.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout3.ID,
@@ -251,12 +251,12 @@ func TestGatewayConsumerInvalidEvents(t *testing.T) {
 
 	consumer, _, _, payout := consumerFixture(t, domain.StateSentToGateway, nil, nil)
 
-	// Невалидный payout_id.
+	// Invalid payout_id.
 	bad := &eventsv1.GatewayPayoutEvent{PayoutId: "not-a-uuid", Type: eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED}
 	err := consumer.Handle(context.Background(), nil, gatewayEventMessage(t, bad))
 	require.ErrorContains(t, err, "invalid gateway payout event")
 
-	// Отклонение реквизитов комиссии.
+	// Fee details rejection.
 	mismatch := &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
 		Fee:             &commonv1.Money{MinorUnits: 10, Asset: "BTC", Decimals: 8},
@@ -266,7 +266,7 @@ func TestGatewayConsumerInvalidEvents(t *testing.T) {
 	err = consumer.Handle(context.Background(), nil, gatewayEventMessage(t, mismatch))
 	require.ErrorContains(t, err, "invalid gateway payout event")
 
-	// Управляющие символы в reason.
+	// Control characters in reason.
 	control := &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,
 		GatewayPayoutId: "gw-x",
@@ -276,7 +276,7 @@ func TestGatewayConsumerInvalidEvents(t *testing.T) {
 	err = consumer.Handle(context.Background(), nil, gatewayEventMessage(t, control))
 	require.ErrorContains(t, err, "control characters")
 
-	// Неизвестный непустой enum подтверждается без эффекта (BACKWARD_TRANSITIVE).
+	// An unknown non-empty enum is acknowledged with no effect (BACKWARD_TRANSITIVE).
 	unknown := &eventsv1.GatewayPayoutEvent{PayoutId: payout.ID, Type: eventsv1.GatewayPayoutEventType(99)}
 	require.NoError(t, consumer.Handle(context.Background(), nil, gatewayEventMessage(t, unknown)))
 }
@@ -292,6 +292,6 @@ func TestGatewayConsumerUnknownPayoutRetries(t *testing.T) {
 		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
 	}
 	err := consumer.Handle(context.Background(), nil, gatewayEventMessage(t, event))
-	require.ErrorIs(t, err, storage.ErrNotFound, "событие не может опередить создание: повтор")
+	require.ErrorIs(t, err, storage.ErrNotFound, "an event cannot outrun creation: retry")
 	assert.False(t, errors.Is(err, usecase.ErrSagaUnavailable))
 }

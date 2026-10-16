@@ -70,7 +70,7 @@ services:
       METRICS_ADDR: ":9280"
       PG_DSN: postgres://cbl:cbl@postgres:5432/payout?sslmode=disable
       KAFKA_BROKERS: kafka:29092
-      # E2E-сценарий апрувов: мелкие выплаты без оператора, крупные - два оператора.
+      # E2E approval scenario: small payouts without an operator, large ones - two operators.
       PAYOUT_APPROVAL_POLICY: '{"USDT":[{"below_minor":1000000,"approvals":0}],"default":2}'
     ports:
       - "8080:8080"

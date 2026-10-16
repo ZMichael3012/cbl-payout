@@ -21,7 +21,7 @@ import (
 	"github.com/cbl/cbl-payout/internal/usecase"
 )
 
-// fakeLedger подменяет клиент Ledger и фиксирует вызовы.
+// fakeLedger replaces the Ledger client and records calls.
 type fakeLedger struct {
 	reserveErr  error
 	commitErr   error
@@ -33,7 +33,7 @@ type fakeLedger struct {
 	releaseKeys []string
 }
 
-// Reserve фиксирует запрос или возвращает ошибку.
+// Reserve records the request or returns an error.
 func (f *fakeLedger) Reserve(_ context.Context, req usecase.LedgerReserveRequest) (string, error) {
 	f.reserves = append(f.reserves, req)
 	if f.reserveErr != nil {
@@ -42,21 +42,21 @@ func (f *fakeLedger) Reserve(_ context.Context, req usecase.LedgerReserveRequest
 	return "reserve-" + req.RefID, nil
 }
 
-// CommitReserve фиксирует коммит.
+// CommitReserve records the commit.
 func (f *fakeLedger) CommitReserve(_ context.Context, idempotencyKey, reserveID string) error {
 	f.commits = append(f.commits, reserveID)
 	f.commitKeys = append(f.commitKeys, idempotencyKey)
 	return f.commitErr
 }
 
-// ReleaseReserve фиксирует release.
+// ReleaseReserve records the release.
 func (f *fakeLedger) ReleaseReserve(_ context.Context, idempotencyKey, reserveID, _ string) error {
 	f.releases = append(f.releases, reserveID)
 	f.releaseKeys = append(f.releaseKeys, idempotencyKey)
 	return f.releaseErr
 }
 
-// fakeSagaStore реализует usecase.SagaStore и usecase.GatewayEventStore в памяти.
+// fakeSagaStore implements usecase.SagaStore and usecase.GatewayEventStore in memory.
 type fakeSagaStore struct {
 	payouts     map[string]*storage.Payout
 	byKey       map[string]string
@@ -67,7 +67,7 @@ type fakeSagaStore struct {
 	transitions []domain.State
 }
 
-// newFakeSagaStore создает пустое хранилище.
+// newFakeSagaStore creates an empty store.
 func newFakeSagaStore() *fakeSagaStore {
 	return &fakeSagaStore{
 		payouts: make(map[string]*storage.Payout),
@@ -75,7 +75,7 @@ func newFakeSagaStore() *fakeSagaStore {
 	}
 }
 
-// Create создает выплату в памяти; дубликат ключа отвергается.
+// Create creates a payout in memory; a duplicate key is rejected.
 func (f *fakeSagaStore) Create(_ context.Context, payout storage.Payout) error {
 	if f.createErr != nil {
 		return f.createErr
@@ -92,12 +92,12 @@ func (f *fakeSagaStore) Create(_ context.Context, payout storage.Payout) error {
 	return nil
 }
 
-// Payout возвращает выплату.
+// Payout returns the payout.
 func (f *fakeSagaStore) Payout(_ context.Context, id string) (storage.Payout, error) {
 	return f.PayoutTx(context.Background(), nil, id)
 }
 
-// PayoutTx возвращает выплату в транзакции (фейк игнорирует tx).
+// PayoutTx returns the payout in a transaction (the fake ignores tx).
 func (f *fakeSagaStore) PayoutTx(_ context.Context, _ *gorm.DB, id string) (storage.Payout, error) {
 	if f.notFound {
 		return storage.Payout{}, storage.ErrNotFound
@@ -109,7 +109,7 @@ func (f *fakeSagaStore) PayoutTx(_ context.Context, _ *gorm.DB, id string) (stor
 	return *payout, nil
 }
 
-// PayoutByMerchantKey возвращает выплату по ключу идемпотентности.
+// PayoutByMerchantKey returns a payout by idempotency key.
 func (f *fakeSagaStore) PayoutByMerchantKey(_ context.Context, merchantID, key string) (storage.Payout, error) {
 	id, ok := f.byKey[merchantID+"|"+key]
 	if !ok {
@@ -118,7 +118,7 @@ func (f *fakeSagaStore) PayoutByMerchantKey(_ context.Context, merchantID, key s
 	return *f.payouts[id], nil
 }
 
-// Transaction выполняет функцию с откатом состояния при ошибке.
+// Transaction runs the function and rolls the state back on error.
 func (f *fakeSagaStore) Transaction(_ context.Context, fn func(tx *gorm.DB) error) error {
 	snapshot := make(map[string]storage.Payout, len(f.payouts))
 	for id, payout := range f.payouts {
@@ -138,12 +138,12 @@ func (f *fakeSagaStore) Transaction(_ context.Context, fn func(tx *gorm.DB) erro
 	return err
 }
 
-// PayoutForUpdate возвращает выплату под «локом» фейка.
+// PayoutForUpdate returns the payout under the "lock" of the fake.
 func (f *fakeSagaStore) PayoutForUpdate(ctx context.Context, tx *gorm.DB, id string) (storage.Payout, error) {
 	return f.PayoutTx(ctx, tx, id)
 }
 
-// TransitionTx выполняет CAS-переход над фейковой выплатой.
+// TransitionTx performs a CAS transition on the fake payout.
 func (f *fakeSagaStore) TransitionTx(_ context.Context, _ *gorm.DB, id string, expectedVersion uint64, to domain.State, patch storage.TransitionPatch) (storage.Payout, error) {
 	if f.conflicts > 0 {
 		f.conflicts--
@@ -162,7 +162,7 @@ func (f *fakeSagaStore) TransitionTx(_ context.Context, _ *gorm.DB, id string, e
 		return storage.Payout{}, err
 	}
 	payout.State = string(to)
-	payout.StateVersion = int64(next) //nolint:gosec // тестовое значение
+	payout.StateVersion = int64(next) //nolint:gosec // test value
 	if patch.ReserveID != nil {
 		payout.ReserveID = patch.ReserveID
 	}
@@ -190,13 +190,13 @@ func (f *fakeSagaStore) TransitionTx(_ context.Context, _ *gorm.DB, id string, e
 	return *payout, nil
 }
 
-// AppendOutbox фиксирует конверт команды.
+// AppendOutbox records the command envelope.
 func (f *fakeSagaStore) AppendOutbox(_ context.Context, _ *gorm.DB, envelope outbox.Envelope) error {
 	f.commands = append(f.commands, envelope)
 	return nil
 }
 
-// sagaFixture собирает сервис с фейками.
+// sagaFixture builds the service with fakes.
 func sagaFixture(t *testing.T, policyRaw string, ledger usecase.LedgerClient) (*usecase.PayoutService, *fakeSagaStore) {
 	t.Helper()
 	store := newFakeSagaStore()
@@ -206,7 +206,7 @@ func sagaFixture(t *testing.T, policyRaw string, ledger usecase.LedgerClient) (*
 	return service, store
 }
 
-// smallPayoutInput задает валидный вход малой выплаты.
+// smallPayoutInput sets a valid input of a small payout.
 func smallPayoutInput() usecase.CreatePayoutInput {
 	return usecase.CreatePayoutInput{
 		IdempotencyKey:     "key-1",
@@ -257,7 +257,7 @@ func TestCreatePayoutSmallGoesToGateway(t *testing.T) {
 	assert.Equal(t, int64(3), payout.StateVersion, "requested -> reserved -> sent_to_gateway")
 
 	require.Len(t, ledger.reserves, 1)
-	assert.Equal(t, "58686062-c133-5d4e-b08b-0d33a0db924f", ledger.reserves[0].AccountID, "счет удержания по golden-вектору")
+	assert.Equal(t, "58686062-c133-5d4e-b08b-0d33a0db924f", ledger.reserves[0].AccountID, "hold account by the golden vector")
 	assert.Equal(t, payout.ID, ledger.reserves[0].RefID)
 	assert.Equal(t, "payout:"+payout.ID+":reserve", ledger.reserves[0].IdempotencyKey)
 	require.NotNil(t, payout.ReserveID)
@@ -276,7 +276,7 @@ func TestCreatePayoutLargeWaitsApproval(t *testing.T) {
 
 	payout, err := service.Create(context.Background(), smallPayoutInput())
 	require.NoError(t, err)
-	assert.Equal(t, string(domain.StateRequested), payout.State, "крупная выплата ждет голосов")
+	assert.Equal(t, string(domain.StateRequested), payout.State, "a large payout waits for votes")
 	assert.Empty(t, ledger.reserves)
 	assert.Empty(t, store.commands)
 }
@@ -290,13 +290,13 @@ func TestCreatePayoutIdempotentReplay(t *testing.T) {
 	first, err := service.Create(context.Background(), in)
 	require.NoError(t, err)
 
-	// Повтор с тем же телом возвращает ту же выплату (уже в sent_to_gateway).
+	// A replay with the same body returns the same payout (already in sent_to_gateway).
 	second, err := service.Create(context.Background(), in)
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, second.ID)
 	assert.Equal(t, first.State, second.State)
 
-	// Повтор с другим телом - конфликт ключа.
+	// A replay with a different body is a key conflict.
 	changed := in
 	changed.AmountMinor = 200_000
 	_, err = service.Create(context.Background(), changed)
@@ -311,20 +311,20 @@ func TestCreatePayoutRefund(t *testing.T) {
 
 	refundInvoice := uuid.Must(uuid.NewV7()).String()
 	in := smallPayoutInput()
-	in.RefundInvoiceID = strings.ToUpper(refundInvoice) // недоверенный регистр
+	in.RefundInvoiceID = strings.ToUpper(refundInvoice) // untrusted case
 	payout, err := service.Create(context.Background(), in)
 	require.NoError(t, err)
-	assert.Equal(t, string(domain.StateSentToGateway), payout.State, "возврат идет тем же путем саги")
+	assert.Equal(t, string(domain.StateSentToGateway), payout.State, "the refund goes along the same saga path")
 	require.NotNil(t, payout.RefundInvoiceID)
-	assert.Equal(t, refundInvoice, *payout.RefundInvoiceID, "идентификатор счета канонизирован")
+	assert.Equal(t, refundInvoice, *payout.RefundInvoiceID, "the invoice identifier is canonicalized")
 
-	// Возврат и обычная выплата с тем же телом, но без счета, - разные тела.
+	// A refund and an ordinary payout with the same body but no invoice are different bodies.
 	plain := smallPayoutInput()
 	plain.IdempotencyKey = in.IdempotencyKey
 	_, err = service.Create(context.Background(), plain)
-	require.ErrorIs(t, err, usecase.ErrIdempotencyConflict, "маркер возврата входит в request_hash")
+	require.ErrorIs(t, err, usecase.ErrIdempotencyConflict, "the refund marker is part of request_hash")
 
-	// Невалидный идентификатор счета отклоняется до создания.
+	// An invalid invoice identifier is rejected before creation.
 	for name, badRefund := range map[string]string{
 		"not uuid":   "not-a-uuid",
 		"nil uuid":   uuid.Nil.String(),
@@ -334,9 +334,9 @@ func TestCreatePayoutRefund(t *testing.T) {
 		bad.IdempotencyKey = "refund-bad-" + name
 		bad.RefundInvoiceID = badRefund
 		_, err = service.Create(context.Background(), bad)
-		require.ErrorIsf(t, err, usecase.ErrInvalidPayoutInput, "маркер %q", badRefund)
+		require.ErrorIsf(t, err, usecase.ErrInvalidPayoutInput, "marker %q", badRefund)
 	}
-	assert.Len(t, store.payouts, 1, "невалидные возвраты не создают выплату")
+	assert.Len(t, store.payouts, 1, "invalid refunds do not create a payout")
 }
 
 func TestCreatePayoutLegacyHashCompatibility(t *testing.T) {
@@ -348,7 +348,7 @@ func TestCreatePayoutLegacyHashCompatibility(t *testing.T) {
 	service := usecase.NewPayoutService(store, &fakeLedger{}, policy, zap.NewNop())
 
 	in := smallPayoutInput()
-	// Строка, созданная до 10.6: хэш формата без маркера возврата.
+	// A row created before 10.6: the hash of the format without the refund marker.
 	legacyCanonical := "3:m-1" + "6:100000" + "4:USDT" + "1:2" + "5:trc20" +
 		"34:TJRabPrwbZy45sbavfcjinPJC18kjpRTv8" + "5:ref-1"
 	sum := sha256.Sum256([]byte(legacyCanonical))
@@ -373,7 +373,7 @@ func TestCreatePayoutLegacyHashCompatibility(t *testing.T) {
 	store.byKey[in.MerchantID+"|"+in.IdempotencyKey] = id
 
 	result, err := service.Create(context.Background(), in)
-	require.NoError(t, err, "хэш обычной выплаты до 10.6 совпадает: повтор идемпотентен")
+	require.NoError(t, err, "the hash of an ordinary payout before 10.6 matches: the replay is idempotent")
 	assert.Equal(t, id, result.ID)
 }
 
@@ -387,9 +387,9 @@ func TestCreatePayoutHashSeparatesFieldBoundaries(t *testing.T) {
 	_, err := service.Create(context.Background(), first)
 	require.NoError(t, err)
 
-	// Те же байты на границе полей, но другое разбиение: сеть "trc20",
-	// адрес "extra|Taddr". Хэш обязан различать тела (иначе чужой адрес
-	// вернется как идемпотентный повтор).
+	// The same bytes at the field boundary but a different split: network
+	// "trc20", address "extra|Taddr". The hash must distinguish the bodies
+	// (otherwise a foreign address would come back as an idempotent replay).
 	second := smallPayoutInput()
 	second.Network = "trc20"
 	second.DestinationAddress = "extra|Taddr"
@@ -405,10 +405,10 @@ func TestCreatePayoutLedgerRejectedCompensates(t *testing.T) {
 
 	payout, err := service.Create(context.Background(), smallPayoutInput())
 	require.NoError(t, err)
-	assert.Equal(t, string(domain.StateCompensated), payout.State, "отказ до резерва: failed -> compensated")
+	assert.Equal(t, string(domain.StateCompensated), payout.State, "rejection before the reserve: failed -> compensated")
 	require.NotNil(t, payout.FailureReason)
 	assert.Equal(t, []domain.State{domain.StateFailed, domain.StateCompensated}, store.transitions)
-	assert.Empty(t, ledger.releases, "release не вызывается без резерва")
+	assert.Empty(t, ledger.releases, "release is not called without a reserve")
 }
 
 func TestCreatePayoutLedgerUnavailableKeepsState(t *testing.T) {
@@ -420,7 +420,7 @@ func TestCreatePayoutLedgerUnavailableKeepsState(t *testing.T) {
 	_, err := service.Create(context.Background(), smallPayoutInput())
 	require.ErrorIs(t, err, usecase.ErrLedgerUnavailable)
 
-	// Выплата осталась в requested: повтор Create или Advance доведет сагу.
+	// The payout stayed in requested: a Create or Advance replay completes the saga.
 	for _, payout := range store.payouts {
 		assert.Equal(t, string(domain.StateRequested), payout.State)
 	}
@@ -438,7 +438,7 @@ func TestAdvanceIdempotent(t *testing.T) {
 	again, err := service.Advance(context.Background(), payout.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(domain.StateSentToGateway), again.State)
-	assert.Len(t, ledger.reserves, 1, "повторный Advance не резервирует заново")
+	assert.Len(t, ledger.reserves, 1, "a repeated Advance does not reserve again")
 }
 
 func TestAdvanceWithoutLedgerUnavailable(t *testing.T) {

@@ -1,5 +1,5 @@
 -- +goose Up
--- Reference DDL из cbl-kit/migrations/outbox.sql (.specs/CBL-003-contracts.md).
+-- Reference DDL from cbl-kit/migrations/outbox.sql (.specs/CBL-003-contracts.md).
 CREATE TABLE outbox (
     id           bigserial PRIMARY KEY,
     event_id     uuid        NOT NULL UNIQUE,

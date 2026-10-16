@@ -8,24 +8,24 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrInvalidAccountPlan сообщает о некорректном бизнес-ключе счета Ledger.
+// ErrInvalidAccountPlan reports an invalid Ledger account business key.
 var ErrInvalidAccountPlan = errors.New("payout: invalid account plan key")
 
-// accountNamePrefix задает версионированный префикс канонического имени счета:
-// смена схемы вывода идентификаторов выпускается новой версией префикса
-// (алгоритм владельца - Ledger 2.6, CBL-003 раздел 9).
+// accountNamePrefix defines the versioned prefix of the canonical account name:
+// a change of the identifier derivation scheme is issued as a new prefix version
+// (owner algorithm - Ledger 2.6, CBL-003 section 9).
 const accountNamePrefix = "cbl:ledger:account:v1"
 
-// Правила плана счетов Ledger для актива и ссылки мерчанта: payout обязан
-// воспроизводить их один в один, иначе идентификатор счета разойдется.
+// Ledger account plan rules for the asset and the merchant reference: payout must
+// reproduce them one to one, otherwise the account identifier would diverge.
 var (
 	planAssetPattern       = regexp.MustCompile(`^[A-Z0-9]{1,16}$`)
 	planMerchantRefPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 )
 
-// MerchantAccountID выводит детерминированный UUIDv5 счета мерчанта
-// (merchant/<asset>/<decimals>/<merchant_ref>) по golden-векторам CBL-003 §9:
-// одинаковый ключ в payout и Ledger дает один идентификатор (KI-ledger-08).
+// MerchantAccountID derives the deterministic UUIDv5 of the merchant account
+// (merchant/<asset>/<decimals>/<merchant_ref>) from the golden vectors of CBL-003 section 9:
+// the same key in payout and Ledger yields one identifier (KI-ledger-08).
 func MerchantAccountID(merchantRef, asset string, decimals int) (string, error) {
 	if !planAssetPattern.MatchString(asset) {
 		return "", fmt.Errorf("%w: asset %q", ErrInvalidAccountPlan, asset)

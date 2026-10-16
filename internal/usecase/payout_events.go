@@ -19,26 +19,26 @@ import (
 	"github.com/cbl/cbl-payout/internal/storage"
 )
 
-// Константы событий payout (CBL-003, раздел 6).
+// Payout event constants (CBL-003, section 6).
 const (
-	// ProducerPayout задает имя сервиса-продюсера событий выплаты.
+	// ProducerPayout sets the name of the payout event producer service.
 	ProducerPayout = "cbl-payout"
-	// TopicPayoutEvents задает топик жизненного цикла выплаты.
+	// TopicPayoutEvents sets the payout lifecycle topic.
 	TopicPayoutEvents = "payout.events"
-	// TopicPayoutCommands задает топик команд выплаты для Connector.
+	// TopicPayoutCommands sets the payout command topic for Connector.
 	TopicPayoutCommands = "payout.commands"
-	// SchemaVersion задает версию схем событий выплаты.
+	// SchemaVersion sets the schema version of payout events.
 	SchemaVersion = "v1"
 )
 
-// PayoutEventSink собирает protobuf-конверты payout.events и пишет их в outbox
-// в транзакции перехода (storage.TransitionEventSink).
+// PayoutEventSink builds protobuf envelopes of payout.events and writes them
+// to the outbox in the transition transaction (storage.TransitionEventSink).
 type PayoutEventSink struct {
 	store *outbox.Store
 	log   *zap.Logger
 }
 
-// NewPayoutEventSink создает PayoutEventSink.
+// NewPayoutEventSink creates a PayoutEventSink.
 func NewPayoutEventSink(log *zap.Logger) *PayoutEventSink {
 	if log == nil {
 		log = zap.NewNop()
@@ -46,9 +46,9 @@ func NewPayoutEventSink(log *zap.Logger) *PayoutEventSink {
 	return &PayoutEventSink{store: outbox.NewStore(), log: log}
 }
 
-// AppendTransitionEvent собирает конверт события и записывает его в outbox.
-// Переходы в состояния без типа в контракте (reserved, sent_to_gateway)
-// пропускаются: события несут бизнес-вехи, а не внутренние шаги саги.
+// AppendTransitionEvent builds the event envelope and writes it to the outbox.
+// Transitions to states without a contract type (reserved, sent_to_gateway)
+// are skipped: events carry business milestones, not internal saga steps.
 func (s *PayoutEventSink) AppendTransitionEvent(ctx context.Context, tx *gorm.DB, event storage.TransitionEvent) error {
 	envelope, emit, err := BuildPayoutEventEnvelope(event)
 	if err != nil {
@@ -68,9 +68,9 @@ func (s *PayoutEventSink) AppendTransitionEvent(ctx context.Context, tx *gorm.DB
 	return nil
 }
 
-// BuildPayoutEventEnvelope собирает конверт payout.events для перехода:
-// protobuf-тело billing.events.v1.PayoutEvent и заголовки конверта CBL.
-// Второе значение false означает, что состояние не имеет типа в CF-2.
+// BuildPayoutEventEnvelope builds the payout.events envelope for a transition:
+// the protobuf body billing.events.v1.PayoutEvent and the CBL envelope headers.
+// A false second value means the state has no type in CF-2.
 func BuildPayoutEventEnvelope(event storage.TransitionEvent) (outbox.Envelope, bool, error) {
 	eventType, emit := payoutEventType(event.To)
 	if !emit {
@@ -113,9 +113,9 @@ func BuildPayoutEventEnvelope(event storage.TransitionEvent) (outbox.Envelope, b
 	return envelope, true, nil
 }
 
-// BuildPayoutCommandEnvelope собирает конверт команды payout.commands:
-// protobuf-тело billing.events.v1.PayoutCommand с ключом идемпотентности
-// команды для Connector.
+// BuildPayoutCommandEnvelope builds the payout.commands command envelope: the
+// protobuf body billing.events.v1.PayoutCommand with the command idempotency
+// key for Connector.
 func BuildPayoutCommandEnvelope(payout storage.Payout) (outbox.Envelope, error) {
 	payload := &eventsv1.PayoutCommand{
 		PayoutId: payout.ID,
@@ -145,8 +145,8 @@ func BuildPayoutCommandEnvelope(payout storage.Payout) (outbox.Envelope, error) 
 	return envelope, nil
 }
 
-// payoutEventType переводит целевое состояние перехода в контрактный тип;
-// состояния reserved и sent_to_gateway типа не имеют (внутренние шаги).
+// payoutEventType maps the transition target state to the contract type;
+// the reserved and sent_to_gateway states have no type (internal steps).
 func payoutEventType(state domain.State) (eventsv1.PayoutEventType, bool) {
 	switch state {
 	case domain.StateRequested:
@@ -166,8 +166,8 @@ func payoutEventType(state domain.State) (eventsv1.PayoutEventType, bool) {
 	}
 }
 
-// moneyFrom собирает Money из необязательной тройки полей; неполная тройка
-// (сумма без актива или шкалы) денег не образует и опускается.
+// moneyFrom builds Money from the optional field triple; an incomplete triple
+// (an amount without an asset or scale) does not form money and is omitted.
 func moneyFrom(amount *int64, asset *string, decimals *int) *commonv1.Money {
 	if amount == nil || asset == nil || decimals == nil {
 		return nil
@@ -179,7 +179,7 @@ func moneyFrom(amount *int64, asset *string, decimals *int) *commonv1.Money {
 	}
 }
 
-// derefString разыменовывает необязательную строку (nil - пустая).
+// derefString dereferences an optional string (nil means empty).
 func derefString(value *string) string {
 	if value == nil {
 		return ""
@@ -187,7 +187,7 @@ func derefString(value *string) string {
 	return *value
 }
 
-// decimalsToUint32 безопасно переводит шкалу в uint32 контракта.
+// decimalsToUint32 safely converts the scale to the contract uint32.
 func decimalsToUint32(decimals int) uint32 {
 	if decimals < 0 {
 		return 0
