@@ -87,9 +87,11 @@ operators, an invalid value refuses startup; changed only by a restart),
 
 ## 6. Development rules
 
-- Pipeline: SDD spec in `.specs/` -> architecture -> contracts -> tests first -> code ->
-  review by 4 agents (no-context, architecture, with-context, security - blocking) ->
-  AGENTS.md -> final runs -> linters -> commit.
+- Pipeline (TDD-first, CBL-001): an SDD spec with the architecture sketch and the full test
+  plan (unit and integration matrices, e2e scenario descriptions) -> contracts -> red tests
+  with recorded evidence -> implementation -> 4-agent review on the staged diff (no-context,
+  architecture, with-context, security - blocking) -> AGENTS.md -> final runs (unit +
+  integration + local e2e) -> linters -> commit.
 - Unit+integration coverage is at least 80%; money scenarios only on real PostgreSQL and
   Kafka (testcontainers); local e2e in docker-compose is mandatory.
 - Money is only int64 in minor units plus decimals; float is forbidden.
