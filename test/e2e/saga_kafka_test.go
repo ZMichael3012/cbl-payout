@@ -254,6 +254,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 		PayoutId:        payout.ID,
 		GatewayPayoutId: "gw-e2e",
 		Txid:            "tx-e2e",
+		Provider:        "coingate",
 		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_SUBMITTED,
 	})
 	waitForStateVersion(t, ctx, repo, payout.ID, 4)
@@ -262,11 +263,14 @@ func TestSagaKafkaFlow(t *testing.T) {
 		PayoutId:        payout.ID,
 		GatewayPayoutId: "gw-e2e",
 		Txid:            "tx-e2e",
+		Provider:        "coingate",
 		Fee:             &commonv1.Money{MinorUnits: 100, Asset: "USDT", Decimals: 2},
 		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
 	})
 	completed := waitForState(t, ctx, repo, payout.ID, domain.StateCompleted)
 	require.NotNil(t, completed.CompletedAt)
+	require.NotNil(t, completed.Provider)
+	assert.Equal(t, "coingate", *completed.Provider, "the submitted event records the provider")
 	assert.Equal(t, []string{"reserve-" + payout.ID}, ledger.commits)
 
 	// 3. payout.events: requested and completed with versions.
@@ -284,6 +288,7 @@ func TestSagaKafkaFlow(t *testing.T) {
 	assert.Equal(t, uint64(1), requested.GetStateVersion())
 	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_COMPLETED, completedEvent.GetType())
 	require.NotNil(t, completedEvent.GetOccurredAt())
+	assert.Equal(t, "coingate", completedEvent.GetProvider(), "payout.events carries the provider")
 
 	// 4. Second payout: submitted, then gateway rejection - release and compensated.
 	failedInput := in

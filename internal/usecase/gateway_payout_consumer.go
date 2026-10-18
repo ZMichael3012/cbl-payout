@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -194,7 +195,11 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 		case actionTooEarly:
 			return fmt.Errorf("usecase: gateway payout event too early for %s: %w", payout.ID, errGatewayTooEarly)
 		case actionSubmitted:
-			applied, applyErr := c.applyTransition(ctx, tx, payout, domain.StateSentToGateway, submittedPatch(&event), "gateway submitted")
+			patch, patchErr := submittedPatch(&event)
+			if patchErr != nil {
+				return patchErr
+			}
+			applied, applyErr := c.applyTransition(ctx, tx, payout, domain.StateSentToGateway, patch, "gateway submitted")
 			if applyErr != nil {
 				return applyErr
 			}
@@ -218,6 +223,15 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 			patch := storage.TransitionPatch{Reason: "gateway confirmed", CompletedAt: &completedAt}
 			if txid := strings.TrimSpace(event.GetTxid()); txid != "" {
 				patch.TxID = &txid
+			}
+			// A legacy payout completed by a provider-bearing verdict records
+			// the provider, so payout.events and the Reconciler see it.
+			if payout.Provider == nil || *payout.Provider == "" {
+				if provider, providerErr := normalizeProvider(event.GetProvider()); providerErr != nil {
+					return providerErr
+				} else if provider != "" {
+					patch.Provider = &provider
+				}
 			}
 			if fee := event.GetFee(); fee != nil {
 				amount := fee.GetMinorUnits()
@@ -383,13 +397,22 @@ func validateGatewayEvent(event *eventsv1.GatewayPayoutEvent, eventType gatewayE
 
 // validateVerdictBinding compares the verdict gateway identifier with the
 // recorded submitted: a confirmation or failure without a real submission is
-// not accepted.
+// not accepted. A provider-bearing verdict must agree with the recorded
+// provider (17.11); an empty provider is tolerated for legacy producers.
 func validateVerdictBinding(payout storage.Payout, event *eventsv1.GatewayPayoutEvent) error {
 	if payout.GatewayPayoutID == nil || *payout.GatewayPayoutID == "" {
 		return fmt.Errorf("%w: verdict before submitted", errInvalidGatewayEvent)
 	}
 	if strings.TrimSpace(event.GetGatewayPayoutId()) != *payout.GatewayPayoutID {
 		return fmt.Errorf("%w: gateway_payout_id mismatch", errInvalidGatewayEvent)
+	}
+	provider, providerErr := normalizeProvider(event.GetProvider())
+	if providerErr != nil {
+		return providerErr
+	}
+	if provider != "" && payout.Provider != nil && *payout.Provider != "" &&
+		!strings.EqualFold(*payout.Provider, provider) {
+		return fmt.Errorf("%w: provider mismatch", errInvalidGatewayEvent)
 	}
 	return nil
 }
@@ -408,8 +431,10 @@ func validateEventFee(event *eventsv1.GatewayPayoutEvent, payout storage.Payout)
 	return nil
 }
 
-// submittedPatch builds the submission data patch from the event.
-func submittedPatch(event *eventsv1.GatewayPayoutEvent) storage.TransitionPatch {
+// submittedPatch builds the submission data patch from the event; the provider
+// is validated and normalized, an empty value is tolerated for legacy
+// producers (17.11, KI-payout-11).
+func submittedPatch(event *eventsv1.GatewayPayoutEvent) (storage.TransitionPatch, error) {
 	patch := storage.TransitionPatch{Reason: "gateway submitted"}
 	if gatewayID := strings.TrimSpace(event.GetGatewayPayoutId()); gatewayID != "" {
 		patch.GatewayPayoutID = &gatewayID
@@ -417,7 +442,30 @@ func submittedPatch(event *eventsv1.GatewayPayoutEvent) storage.TransitionPatch 
 	if txid := strings.TrimSpace(event.GetTxid()); txid != "" {
 		patch.TxID = &txid
 	}
-	return patch
+	provider, err := normalizeProvider(event.GetProvider())
+	if err != nil {
+		return storage.TransitionPatch{}, err
+	}
+	if provider != "" {
+		patch.Provider = &provider
+	}
+	return patch, nil
+}
+
+// providerPattern validates the provider id of an untrusted gateway event.
+var providerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,31}$`)
+
+// normalizeProvider lowercases and validates an optional provider id; an empty
+// value means a legacy producer and is accepted.
+func normalizeProvider(raw string) (string, error) {
+	provider := strings.ToLower(strings.TrimSpace(raw))
+	if provider == "" {
+		return "", nil
+	}
+	if !providerPattern.MatchString(provider) {
+		return "", fmt.Errorf("%w: provider", errInvalidGatewayEvent)
+	}
+	return provider, nil
 }
 
 // canonicalUUID brings a valid UUID to its canonical form.
