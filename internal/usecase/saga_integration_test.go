@@ -246,6 +246,14 @@ func TestIntegrationSagaRefundFlow(t *testing.T) {
 	assert.Equal(t, refundInvoice, created.GetRefundInvoiceId())
 	assert.Equal(t, eventsv1.PayoutEventType_PAYOUT_EVENT_TYPE_REQUESTED, created.GetType())
 
+	// The Connector command carries the refund marker: the refund goes through
+	// the provider refunds API, not a payout (17.12, cf-4.2).
+	commands := outboxRows(t, db, usecase.TopicPayoutCommands)
+	require.Len(t, commands, 1)
+	var command eventsv1.PayoutCommand
+	require.NoError(t, proto.Unmarshal(commands[0].Payload, &command))
+	assert.Equal(t, refundInvoice, command.GetRefundInvoiceId())
+
 	// Refund saga: submitted + confirmed -> commit + completed with the marker.
 	require.NoError(t, consumer.Handle(ctx, nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 		PayoutId:        payout.ID,

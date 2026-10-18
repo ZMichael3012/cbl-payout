@@ -128,6 +128,11 @@ func BuildPayoutCommandEnvelope(payout storage.Payout) (outbox.Envelope, error) 
 		Address:        payout.DestinationAddress,
 		IdempotencyKey: "payout:" + payout.ID + ":command",
 	}
+	// A refund payout carries its source invoice so the Connector calls the
+	// provider refunds API instead of a payout (17.12, cf-4.2).
+	if payout.RefundInvoiceID != nil && *payout.RefundInvoiceID != "" {
+		payload.RefundInvoiceId = *payout.RefundInvoiceID
+	}
 	body, err := proto.Marshal(payload)
 	if err != nil {
 		return outbox.Envelope{}, fmt.Errorf("usecase: marshal payout command: %w", err)
