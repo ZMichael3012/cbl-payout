@@ -168,6 +168,45 @@ func TestGatewayConsumerFailedCompensates(t *testing.T) {
 	assert.Equal(t, []domain.State{domain.StateFailed, domain.StateCompensated}, store.transitions)
 }
 
+func TestGatewayConsumerPreSubmissionFailedCompensates(t *testing.T) {
+	t.Parallel()
+
+	// The connector reports a business rejection before any provider payout
+	// exists (publishFailed carries no gateway_payout_id): the hold must be
+	// released and the payout compensated (CBL-17.26 increment D finding).
+	consumer, store, ledger, payout := consumerFixture(t, domain.StateSentToGateway, ptrString("reserve-9"), nil)
+	event := &eventsv1.GatewayPayoutEvent{
+		PayoutId: payout.ID,
+		Reason:   "provider rejected the payout",
+		Provider: "btcpay",
+		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_FAILED,
+	}
+	require.NoError(t, consumer.Handle(context.Background(), nil, gatewayEventMessage(t, event)))
+
+	updated := store.payouts[payout.ID]
+	assert.Equal(t, string(domain.StateCompensated), updated.State)
+	require.Len(t, ledger.releases, 1)
+	assert.Equal(t, "payout:"+payout.ID+":release", ledger.releaseKeys[0])
+	assert.Equal(t, "reserve-9", ledger.releases[0])
+	require.NotNil(t, updated.FailureReason)
+	assert.Equal(t, "provider rejected the payout", *updated.FailureReason)
+	require.NotNil(t, updated.Provider, "the provider of the verdict is backfilled like the completion path")
+	assert.Equal(t, "btcpay", *updated.Provider)
+	assert.Equal(t, []domain.State{domain.StateFailed, domain.StateCompensated}, store.transitions)
+
+	// The connector emits an empty provider for "no provider supports the
+	// payout" and refund-mapping failures: the shape still compensates.
+	consumer2, store2, ledger2, payout2 := consumerFixture(t, domain.StateSentToGateway, ptrString("reserve-10"), nil)
+	require.NoError(t, consumer2.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
+		PayoutId: payout2.ID,
+		Reason:   "no provider supports the payout",
+		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_FAILED,
+	})))
+	assert.Equal(t, string(domain.StateCompensated), store2.payouts[payout2.ID].State)
+	require.Len(t, ledger2.releases, 1)
+	assert.Nil(t, store2.payouts[payout2.ID].Provider)
+}
+
 func TestGatewayConsumerFailedReplayWithoutRelease(t *testing.T) {
 	t.Parallel()
 
@@ -228,12 +267,33 @@ func TestGatewayConsumerVerdictBinding(t *testing.T) {
 	require.ErrorContains(t, err, "gateway_payout_id mismatch")
 	assert.Empty(t, ledger2.releases)
 
-	// A verdict without gateway_payout_id is a DLQ error.
+	// A confirmed verdict without gateway_payout_id is a DLQ error (a failed
+	// verdict may omit it only against a never-submitted payout).
 	err = consumer2.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
 		PayoutId: payout2.ID,
 		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_CONFIRMED,
 	}))
 	require.ErrorContains(t, err, "gateway_payout_id is required")
+
+	// A failed verdict naming a gateway payout that was never submitted is a
+	// DLQ error (the second half of the pre-submission exception).
+	consumer4, _, ledger4, payout4 := consumerFixture(t, domain.StateSentToGateway, ptrString("reserve-8"), nil)
+	err = consumer4.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
+		PayoutId:        payout4.ID,
+		GatewayPayoutId: "gw-forged",
+		Type:            eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_FAILED,
+	}))
+	require.ErrorContains(t, err, "verdict before submitted")
+	assert.Empty(t, ledger4.releases)
+
+	// A failed verdict without a gateway_payout_id against an already submitted
+	// payout is a mismatch (a forged pre-submission failure cannot kill it).
+	err = consumer2.Handle(context.Background(), nil, gatewayEventMessage(t, &eventsv1.GatewayPayoutEvent{
+		PayoutId: payout2.ID,
+		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_FAILED,
+	}))
+	require.ErrorContains(t, err, "gateway_payout_id mismatch")
+	assert.Empty(t, ledger2.releases)
 
 	// confirmed without a reserve is a DLQ error with no Ledger call.
 	consumer3, _, ledger3, payout3 := consumerFixture(t, domain.StateSentToGateway, nil, ptrString("gw-7"))

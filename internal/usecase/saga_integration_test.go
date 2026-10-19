@@ -164,6 +164,39 @@ func TestIntegrationSagaFailedCompensation(t *testing.T) {
 		[]string{events[0].Headers[outbox.HeaderEventType], events[1].Headers[outbox.HeaderEventType], events[2].Headers[outbox.HeaderEventType]})
 }
 
+func TestIntegrationSagaPreSubmissionFailedCompensation(t *testing.T) {
+	db, repo := setupSagaDB(t)
+	service, consumer, ledger := sagaServiceAt(t, repo, `{"default":0}`)
+	ctx := context.Background()
+
+	payout, err := service.Create(ctx, smallPayoutInput())
+	require.NoError(t, err)
+
+	// The connector rejects the payout before any provider payout exists
+	// (publishFailed: no gateway_payout_id, provider present): the hold is
+	// released and the payout compensated (CBL-17.26 increment D finding).
+	event := &eventsv1.GatewayPayoutEvent{
+		PayoutId: payout.ID,
+		Provider: "btcpay",
+		Reason:   "provider rejected the payout",
+		Type:     eventsv1.GatewayPayoutEventType_GATEWAY_PAYOUT_EVENT_TYPE_FAILED,
+	}
+	require.NoError(t, consumer.Handle(ctx, nil, gatewayEventMessage(t, event)))
+
+	compensated, history, err := repo.Get(ctx, payout.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(domain.StateCompensated), compensated.State)
+	assert.Equal(t, []string{*payout.ReserveID}, ledger.releases)
+	require.NotNil(t, compensated.Provider)
+	assert.Equal(t, "btcpay", *compensated.Provider)
+	require.Len(t, history, 5, "requested, reserved, sent_to_gateway, failed, compensated")
+
+	events := outboxRows(t, db, usecase.TopicPayoutEvents)
+	require.Len(t, events, 3)
+	assert.Equal(t, []string{"payout.requested", "payout.failed", "payout.compensated"},
+		[]string{events[0].Headers[outbox.HeaderEventType], events[1].Headers[outbox.HeaderEventType], events[2].Headers[outbox.HeaderEventType]})
+}
+
 func TestIntegrationSagaReserveRejected(t *testing.T) {
 	db, repo := setupSagaDB(t)
 	policy, err := domain.ParseApprovalPolicy(`{"default":0}`)

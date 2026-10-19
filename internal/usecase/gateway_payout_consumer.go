@@ -170,9 +170,12 @@ func (c *GatewayPayoutConsumer) Handle(ctx context.Context, tx *gorm.DB, msg inb
 		}
 		// Verdict binding to the command: confirmed/failed must carry a
 		// gateway_payout_id matching the recorded submitted, so a forged event
-		// does not complete or compensate the payout (DLQ).
+		// does not complete or compensate the payout (DLQ); the only exception
+		// is the connector pre-submission rejection (publishFailed): a failed
+		// verdict with no gateway_payout_id against a payout that never
+		// recorded one releases the hold (CBL-17.26 increment D finding).
 		if eventType != gatewayKindSubmitted {
-			if bindingErr := validateVerdictBinding(payout, &event); bindingErr != nil {
+			if bindingErr := validateVerdictBinding(payout, &event, eventType); bindingErr != nil {
 				return bindingErr
 			}
 		}
@@ -291,16 +294,28 @@ func (c *GatewayPayoutConsumer) applyTransition(ctx context.Context, tx *gorm.DB
 // in one CAS plan; release has already been performed by the caller.
 func (c *GatewayPayoutConsumer) compensate(ctx context.Context, tx *gorm.DB, payout storage.Payout, state domain.State, event *eventsv1.GatewayPayoutEvent) (bool, error) {
 	current := payout
+	preSubmission := payout.GatewayPayoutID == nil || strings.TrimSpace(*payout.GatewayPayoutID) == ""
 	if state == domain.StateSentToGateway {
 		reason := strings.TrimSpace(event.GetReason())
 		if reason == "" {
 			reason = "gateway failed"
 		}
 		reason = truncateReason(reason)
-		failed, err := c.store.TransitionTx(ctx, tx, current.ID, uint64(current.StateVersion), domain.StateFailed, storage.TransitionPatch{ //nolint:gosec // CHECK >= 1
+		patch := storage.TransitionPatch{
 			FailureReason: &reason,
 			Reason:        "gateway failed",
-		})
+		}
+		// A legacy payout failed by a provider-bearing verdict records the
+		// provider, so payout.events and the Reconciler see it (mirrors the
+		// completion backfill of T-PAYOUT-10).
+		if payout.Provider == nil || *payout.Provider == "" {
+			if provider, providerErr := normalizeProvider(event.GetProvider()); providerErr != nil {
+				return false, providerErr
+			} else if provider != "" {
+				patch.Provider = &provider
+			}
+		}
+		failed, err := c.store.TransitionTx(ctx, tx, current.ID, uint64(current.StateVersion), domain.StateFailed, patch) //nolint:gosec // CHECK >= 1
 		if errors.Is(err, domain.ErrStateConflict) {
 			return false, nil
 		}
@@ -318,9 +333,13 @@ func (c *GatewayPayoutConsumer) compensate(ctx context.Context, tx *gorm.DB, pay
 	if err != nil {
 		return false, fmt.Errorf("usecase: gateway compensate %s: %w", current.ID, err)
 	}
+	// The pre_submission flag distinguishes the connector rejection before any
+	// provider payout (the accepted no-id shape) from a real gateway failure
+	// in incident triage.
 	c.log.Warn("payout failed at gateway and compensated",
 		zap.String("payout_id", current.ID),
-		zap.Int64("state_version", compensated.StateVersion))
+		zap.Int64("state_version", compensated.StateVersion),
+		zap.Bool("pre_submission", preSubmission))
 	return true, nil
 }
 
@@ -361,13 +380,15 @@ func planGatewayEvent(state domain.State, eventType gatewayEventKind) (gatewayAc
 }
 
 // validateGatewayEvent validates the untrusted gateway event: identifiers,
-// length limits, control characters and the mandatory verdict gateway_payout_id.
+// length limits, control characters and the mandatory verdict gateway_payout_id
+// of a confirmation (a failed verdict may omit it: the connector publishes the
+// pre-submission rejection without one).
 func validateGatewayEvent(event *eventsv1.GatewayPayoutEvent, eventType gatewayEventKind) error {
 	if _, err := uuid.Parse(event.GetPayoutId()); err != nil {
 		return fmt.Errorf("%w: payout_id", errInvalidGatewayEvent)
 	}
-	if eventType != gatewayKindSubmitted && strings.TrimSpace(event.GetGatewayPayoutId()) == "" {
-		return fmt.Errorf("%w: gateway_payout_id is required for verdict", errInvalidGatewayEvent)
+	if eventType == gatewayKindConfirmed && strings.TrimSpace(event.GetGatewayPayoutId()) == "" {
+		return fmt.Errorf("%w: gateway_payout_id is required for confirmation", errInvalidGatewayEvent)
 	}
 	if fee := event.GetFee(); fee != nil {
 		if fee.GetMinorUnits() < 0 {
@@ -396,14 +417,26 @@ func validateGatewayEvent(event *eventsv1.GatewayPayoutEvent, eventType gatewayE
 }
 
 // validateVerdictBinding compares the verdict gateway identifier with the
-// recorded submitted: a confirmation or failure without a real submission is
-// not accepted. A provider-bearing verdict must agree with the recorded
-// provider (17.11); an empty provider is tolerated for legacy producers.
-func validateVerdictBinding(payout storage.Payout, event *eventsv1.GatewayPayoutEvent) error {
-	if payout.GatewayPayoutID == nil || *payout.GatewayPayoutID == "" {
-		return fmt.Errorf("%w: verdict before submitted", errInvalidGatewayEvent)
+// recorded submitted: the only accepted shape without a real submission is the
+// connector pre-submission rejection (a failed verdict without a gateway id
+// against a payout that never recorded one); every other mismatch is a DLQ
+// error. A provider-bearing verdict must agree with the recorded provider
+// (17.11); an empty provider is tolerated for legacy producers.
+func validateVerdictBinding(payout storage.Payout, event *eventsv1.GatewayPayoutEvent, eventType gatewayEventKind) error {
+	eventGatewayID := strings.TrimSpace(event.GetGatewayPayoutId())
+	recorded := ""
+	if payout.GatewayPayoutID != nil {
+		recorded = strings.TrimSpace(*payout.GatewayPayoutID)
 	}
-	if strings.TrimSpace(event.GetGatewayPayoutId()) != *payout.GatewayPayoutID {
+	if recorded == "" {
+		// A payout that never recorded a provider payout accepts exactly one
+		// verdict shape: a failed event without a gateway id (the connector
+		// pre-submission rejection, publishFailed); every other shape is a
+		// verdict before submitted (DLQ).
+		if eventType != gatewayKindFailed || eventGatewayID != "" {
+			return fmt.Errorf("%w: verdict before submitted", errInvalidGatewayEvent)
+		}
+	} else if eventGatewayID != recorded {
 		return fmt.Errorf("%w: gateway_payout_id mismatch", errInvalidGatewayEvent)
 	}
 	provider, providerErr := normalizeProvider(event.GetProvider())

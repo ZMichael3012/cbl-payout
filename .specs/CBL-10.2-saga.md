@@ -97,10 +97,16 @@ mix up commit/release):
   `payout:{id}:commit`), then a CAS transition `sent_to_gateway -> completed`
   (patching txid, fee, completed_at); a Ledger error/conflict - event retry
   (commit is idempotent);
-- `failed`: the same binding to `gateway_payout_id`; `sent_to_gateway -> failed`
-  (reason) and compensation: release (when `reserve_id` is set) before the transition
-  `failed -> compensated`; for the state `failed` (an event repeat after a partial
-  success) - only release + `compensated`; from terminal - stale.
+- `failed`: the binding to `gateway_payout_id` with one accepted exception
+  (CBL-17.26 increment D finding): a failed verdict WITHOUT a gateway identifier
+  against a payout that never recorded one is the connector pre-submission
+  rejection (`publishFailed`: the provider was never reached, no submission to
+  poll) - `sent_to_gateway -> failed` (reason) and compensation: release (when
+  `reserve_id` is set) before the transition `failed -> compensated`; a failed
+  verdict carrying an identifier against a never-submitted payout, or a missing
+  identifier against an already submitted payout - DLQ; for the state `failed`
+  (an event repeat after a partial success) - only release + `compensated`;
+  from terminal - stale.
 An invalid event (an invalid payout_id, a negative/mismatched fee,
 decimals outside 0 - 18, control characters, overlong strings) - DLQ.
 An unknown non-empty enum type is acked with a WARN (BACKWARD_TRANSITIVE
@@ -246,6 +252,14 @@ Four independent passes (15.10.2026). BLOCKERs are closed: verdict binding -
 a verdict before `submitted` - DLQ without calling Ledger (a forged event neither
 completes nor compensates the payout); the payout row lock in the consumer serializes
 verdicts (commit and release do not mix).
+AMENDED 19.10.2026 (CBL-17.26 increment D finding): the binding gains one accepted
+shape - a `failed` verdict without a gateway identifier against a payout that never
+recorded one is the connector pre-submission rejection (`publishFailed`) and
+compensates (release); every other shape before `submitted` stays a DLQ error. The
+residual ambiguity (the payout may be in flight at the provider during a connector
+crash window; the connector must emit the no-id shape only for a definitive
+rejection) is recorded in AGENTS.md T-PAYOUT-08; the decision is reviewed in
+`.specs/CBL-17.26-payout-pre-submission-failure.md`.
 MAJORs are closed: `request_hash` switched to length-prefix (collisions at field
 boundaries are impossible); the `merchant_id` format is aligned with the Ledger chart
 of accounts (the payout does not hang on account derivation); a repeated `CreatePayout`
