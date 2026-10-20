@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 
 	"github.com/cbl/cbl-payout/internal/domain"
 )

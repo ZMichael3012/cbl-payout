@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/cbl/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/outbox"
 
 	"github.com/cbl/cbl-payout/internal/domain"
 )

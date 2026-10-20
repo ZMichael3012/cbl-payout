@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	payoutv1 "github.com/cbl/cbl-protos/gen/go/billing/payout/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	payoutv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/payout/v1"
 
 	"github.com/cbl/cbl-payout/internal/domain"
 	"github.com/cbl/cbl-payout/internal/storage"

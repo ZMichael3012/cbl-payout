@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	commonv1 "github.com/cbl/cbl-protos/gen/go/billing/common/v1"
-	eventsv1 "github.com/cbl/cbl-protos/gen/go/billing/events/v1"
+	commonv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/common/v1"
+	eventsv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/events/v1"
 
-	"github.com/cbl/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/outbox"
 
 	"github.com/cbl/cbl-payout/internal/domain"
 	"github.com/cbl/cbl-payout/internal/storage"

@@ -23,13 +23,13 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	payoutv1 "github.com/cbl/cbl-protos/gen/go/billing/payout/v1"
+	payoutv1 "github.com/ZMichael3012/cbl-protos/gen/go/billing/payout/v1"
 
-	"github.com/cbl/cbl-kit/inbox"
-	"github.com/cbl/cbl-kit/inbox/kafkaconsumer"
-	"github.com/cbl/cbl-kit/outbox"
-	"github.com/cbl/cbl-kit/outbox/kafkapub"
-	"github.com/cbl/cbl-kit/storagex"
+	"github.com/ZMichael3012/cbl-kit/inbox"
+	"github.com/ZMichael3012/cbl-kit/inbox/kafkaconsumer"
+	"github.com/ZMichael3012/cbl-kit/outbox"
+	"github.com/ZMichael3012/cbl-kit/outbox/kafkapub"
+	"github.com/ZMichael3012/cbl-kit/storagex"
 
 	"github.com/cbl/cbl-payout/internal/domain"
 	"github.com/cbl/cbl-payout/internal/ledgerclient"
