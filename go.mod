@@ -3,8 +3,8 @@ module github.com/cbl/cbl-payout
 go 1.26.0
 
 require (
-	github.com/cbl/cbl-kit v0.0.0-00010101000000-000000000000
-	github.com/cbl/cbl-protos v0.0.0-00010101000000-000000000000
+	github.com/cbl/cbl-kit v0.0.0-20261020024025-deb4e66f1a90
+	github.com/cbl/cbl-protos v0.0.0-20261020024006-5f606b124c94
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -106,7 +106,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 )
-
-replace github.com/cbl/cbl-kit => ../cbl-kit
-
-replace github.com/cbl/cbl-protos => ../cbl-protos

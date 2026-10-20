@@ -24,7 +24,7 @@ vet:
 # lint mounts the whole services/ directory: the replace directive to ../cbl-kit
 # resolves inside the container.
 lint:
-	docker run --rm -v "$(CURDIR)/..":/src -w /src/$(notdir $(CURDIR)) golangci/golangci-lint:latest-alpine golangci-lint run ./...
+	docker run --rm -v "$(CURDIR)":/src -w /src -e GOPRIVATE=github.com/cbl/* -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=url.https://github.com/ZMichael3012/.insteadOf -e GIT_CONFIG_VALUE_0=https://github.com/cbl/ golangci/golangci-lint:latest-alpine golangci-lint run ./...
 
 fmt:
 	gofmt -l .

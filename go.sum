@@ -12,6 +12,10 @@ github.com/bytedance/sonic v1.11.6 h1:oUp34TzMlL+OY1OUWxHqsdkgC/Zfc85zGqw9siXjrc
 github.com/bytedance/sonic v1.11.6/go.mod h1:LysEHSvpvDySVdC2f87zGWf6CIKJcAvqab1ZaiQtds4=
 github.com/bytedance/sonic/loader v0.1.1 h1:c+e5Pt1k/cy5wMveRDyk2X4B9hF4g7an8N3zCYjJFNM=
 github.com/bytedance/sonic/loader v0.1.1/go.mod h1:ncP89zfokxS5LZrJxl5z0UJcsk4M4yY2JpfqGeCtNLU=
+github.com/cbl/cbl-kit v0.0.0-20261020024025-deb4e66f1a90 h1:xOq5qpJdJTYTmYh63SYWn/pwtRw+SxMqSisfIfkCGyI=
+github.com/cbl/cbl-kit v0.0.0-20261020024025-deb4e66f1a90/go.mod h1:wnW40U9nae4FbixkCa7eNGG6DAxkiBMDhcEnOdGx870=
+github.com/cbl/cbl-protos v0.0.0-20261020024006-5f606b124c94 h1:i6P6pdTW1YSHCIh7z5swhTKJKYcAoiXibeySGAA7L+c=
+github.com/cbl/cbl-protos v0.0.0-20261020024006-5f606b124c94/go.mod h1:7faxZg0/2FlsfUuJoxsDGwtTjTLPLeFAOd9HkdOaVS0=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

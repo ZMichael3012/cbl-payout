@@ -1,17 +1,17 @@
-# Build context: services/ (access to the replace directives on ../cbl-kit and ../cbl-protos is required).
-# Command: docker build -f cbl-payout/Dockerfile -t cbl/payout:dev .
+# Build context: the repository root (CBL-0.9). The cbl-kit and cbl-protos
+# modules are fetched from the GitHub origin; no sibling checkouts are needed.
 FROM golang:1.26-alpine AS build
+RUN apk add --no-cache git
+RUN git config --global url."https://github.com/ZMichael3012/".insteadOf "https://github.com/cbl/"
+ENV GOPRIVATE=github.com/cbl/*
 WORKDIR /src
-COPY cbl-kit/ /src/cbl-kit/
-COPY cbl-protos/ /src/cbl-protos/
-COPY cbl-payout/ /src/cbl-payout/
-WORKDIR /src/cbl-payout
+COPY go.mod go.sum ./
 RUN go mod download
+COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/payout ./cmd/payout
-
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/payout /app/payout
-COPY --from=build /src/cbl-payout/migrations /app/migrations
+COPY --from=build /src/migrations /app/migrations
 EXPOSE 8080 9080 9280
 ENTRYPOINT ["/app/payout"]

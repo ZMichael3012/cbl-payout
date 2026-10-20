@@ -64,7 +64,7 @@ make test         # go test ./...
 make test-integration  # integration (testcontainers: PostgreSQL)
 make test-e2e     # end-to-end saga on testcontainers: Kafka+PostgreSQL, fake Ledger
 make vet          # go vet ./...
-make lint         # golangci-lint in Docker (context services/)
+make lint         # golangci-lint in Docker (repo context; modules from GitHub)
 make up           # docker compose -f deploy/docker-compose.yml --profile app up -d --build
 make down         # docker compose -f deploy/docker-compose.yml down -v
 ```
@@ -153,6 +153,7 @@ consumer lag; dashboards after task 0.7.
 | CBL-17.11 (increment 2, payout) | 2026-10-18 | done, review closed (provider propagation and KI-payout-11 closure: the submitted gateway event validates and records `payouts.provider`, a verdict provider must match the recorded one (a mismatch is an invalid event), a legacy completion backfills it, migration 00006 makes the provider immutable once set, and `payout.events` carry it; red run recorded before the implementation (P-01/P-04/P-05 and I-01/I-03 failed on HEAD); unit and PostgreSQL integration green, coverage 83.2% unit+integration, the saga e2e extended with the provider assertions PASS; lint 0) | `.specs/CBL-17.11-provider-propagation.md` | this commit |
 | CBL-17.12 (increment 1, payout) | 2026-10-18 | done (refund command marker: `BuildPayoutCommandEnvelope` fills `PayoutCommand.refund_invoice_id` (`cbl-protos@cf-4.2`) for a refund payout, so the Connector calls the provider refunds API instead of a payout; red-first run recorded, unit and refund-integration assertions green) | `.specs/CBL-17.12-payout-refund-command.md` | this commit |
 | CBL-17.26 (payout fix) | 2026-10-19 | done, review closed (pre-submission failure compensation: found by the umbrella GE-3 stand run - the connector `publishFailed` (no gateway id) was DLQ'd by the verdict validation, leaving the hold locked; the consumer now accepts exactly the failed-without-id shape against a never-submitted payout and compensates (release), every other shape stays a DLQ error; the compensation backfills the provider and logs `pre_submission`; 4 review passes, findings closed (spec/AGENTS amendments, the full verdict matrix incl. the failed-with-id cell and the empty-provider case, the real-PostgreSQL integration test, trimmed identifiers, docstrings); unit+integration+the saga e2e green, coverage 83.3% with the repo method (baseline 83.2%), lint 0) | `.specs/CBL-17.26-payout-pre-submission-failure.md` | this commit |
+| CBL-0.9 | 2026-10-20 | done (cbl-kit and cbl-protos are pinned remote modules fetched from the GitHub origin; no local replace directives; Docker builds from the repository root; the lint container fetches the modules via GOPRIVATE and the git insteadOf rewrite) | `../../.specs/CBL-0.9-remote-modules.md` (umbrella) | this commit |
 
 ## 11. Runbook
 
