@@ -1,6 +1,6 @@
 # Build context: the repository root (CBL-0.9). The cbl-kit and cbl-protos
 # modules are fetched from the GitHub origin; no sibling checkouts are needed.
-FROM golang:1.26-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
